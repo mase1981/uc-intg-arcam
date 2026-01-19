@@ -74,7 +74,7 @@ class ArcamDevice(ExternalClientDevice):
 
     async def create_client(self) -> Any:
         """Create the Arcam client (required by ExternalClientDevice)."""
-        from arcam.fmj import Client
+        from arcam.fmj.client import Client
         from arcam.fmj.state import State
 
         self._client = Client(self._device_config.host, self._device_config.port)
