@@ -49,7 +49,7 @@ jobs:
                 --collect-all zeroconf \
                 --collect-all ucapi \
                 --collect-all ucapi_framework \
-                --hidden-import=arcam.fmj \
+                --collect-all arcam \
                 --paths . \
                 intg_${INTG_NAME}/__init__.py"
 
