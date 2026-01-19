@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Arcam Integration",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "intg_arcam",
+            "justMyCode": false,
+            "env": {
+                "UC_CONFIG_HOME": "${workspaceFolder}/config",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe"
+        },
+        {
+            "name": "Python Debugger: Arcam Simulator",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/arcam_simulator.py",
+            "args": ["50000"],
+            "justMyCode": false,
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe"
+        }
+    ]
+}

@@ -1,0 +1,38 @@
+{
+  "driver_id": "arcam",
+  "version": "1.0.0",
+  "min_core_api": "0.22.0",
+  "name": {
+    "en": "Arcam FMJ"
+  },
+  "icon": "uc:audio",
+  "description": {
+    "en": "Integration for Arcam FMJ A/V receivers and processors"
+  },
+  "developer": {
+    "name": "Meir Miyara",
+    "email": "meir.miyara@gmail.com"
+  },
+  "home_page": "https://github.com/mase1981/uc-intg-arcam",
+  "release_date": "2026-01-19",
+  "setup_data_schema": {
+    "title": {
+      "en": "Integration setup"
+    },
+    "settings": [
+      {
+        "id": "info",
+        "label": {
+          "en": "Setup information"
+        },
+        "field": {
+          "label": {
+            "value": {
+              "en": "This integration communicates with Arcam FMJ A/V receivers and processors via network connection to provide complete control of your audio system."
+            }
+          }
+        }
+      }
+    ]
+  }
+}
