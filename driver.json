@@ -1,11 +1,11 @@
 {
   "driver_id": "arcam",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "min_core_api": "0.22.0",
   "name": {
     "en": "Arcam FMJ"
   },
-  "icon": "uc:audio",
+  "icon": "uc:cloud-music",
   "description": {
     "en": "Integration for Arcam FMJ A/V receivers and processors"
   },

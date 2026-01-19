@@ -72,31 +72,25 @@ class ArcamDevice(ExternalClientDevice):
     def source_list(self) -> list[str]:
         return self._source_list
 
-    async def establish_connection(self) -> Any:
-        """Create and start the Arcam client."""
+    async def create_client(self) -> Any:
+        """Create the Arcam client (required by ExternalClientDevice)."""
         from arcam.fmj import Client
         from arcam.fmj.state import State
 
-        try:
-            self._client = Client(self._device_config.host, self._device_config.port)
-            self._state = State(self._client, self._device_config.zone)
+        self._client = Client(self._device_config.host, self._device_config.port)
+        self._state = State(self._client, self._device_config.zone)
+        return self._client
 
-            _LOG.info("%s Starting Arcam client", self.log_id)
-            await self._client.start()
+    async def connect_client(self) -> None:
+        """Connect the Arcam client (required by ExternalClientDevice)."""
+        _LOG.info("%s Starting Arcam client", self.log_id)
+        await self._client.start()
 
-            _LOG.info("%s Client started, initializing state", self.log_id)
-            await self._initialize_state()
+        _LOG.info("%s Client started, initializing state", self.log_id)
+        await self._initialize_state()
 
-            return self._client
-
-        except Exception as err:
-            _LOG.error("%s Failed to establish connection: %s", self.log_id, err)
-            self._client = None
-            self._state = None
-            raise
-
-    async def close_connection(self) -> None:
-        """Close the Arcam client connection."""
+    async def disconnect_client(self) -> None:
+        """Disconnect the Arcam client (required by ExternalClientDevice)."""
         if self._client:
             _LOG.info("%s Closing client connection", self.log_id)
             try:
@@ -106,6 +100,12 @@ class ArcamDevice(ExternalClientDevice):
             finally:
                 self._client = None
                 self._state = None
+
+    def check_client_connected(self) -> bool:
+        """Check if the Arcam client is connected (required by ExternalClientDevice)."""
+        if not self._client or not self._state:
+            return False
+        return True
 
     async def maintain_connection(self) -> None:
         """Monitor connection and update state."""
