@@ -8,6 +8,7 @@ Arcam FMJ device implementation for Unfolded Circle integration.
 import asyncio
 import logging
 from typing import Any
+from arcam.fmj import SourceCodes
 from ucapi_framework import ExternalClientDevice, DeviceEvents
 from intg_arcam.config import ArcamConfig
 
@@ -112,27 +113,32 @@ class ArcamDevice(ExternalClientDevice):
         if not self._state:
             return
 
-        update_task = None
         try:
             _LOG.info("%s Starting state monitoring loop", self.log_id)
 
-            def state_update_callback():
-                """Callback when state updates."""
-                asyncio.create_task(self._handle_state_update())
+            # Start the state listener to receive updates from the device
+            await self._state.start()
 
-            self._state.register_callback(state_update_callback)
+            # Initial state update
+            await self._state.update()
+            await self._handle_state_update()
 
-            update_task = asyncio.create_task(self._state.update())
-
-            await asyncio.Future()
+            # Periodic state refresh loop
+            while True:
+                await asyncio.sleep(30)  # Refresh every 30 seconds
+                if self._state and self._client and self._client.connected:
+                    try:
+                        await self._state.update()
+                        await self._handle_state_update()
+                    except Exception as err:
+                        _LOG.debug("%s Error during state refresh: %s", self.log_id, err)
 
         except asyncio.CancelledError:
             _LOG.debug("%s Connection monitoring cancelled", self.log_id)
-            if update_task and not update_task.done():
-                update_task.cancel()
+            if self._state:
                 try:
-                    await update_task
-                except asyncio.CancelledError:
+                    await self._state.stop()
+                except Exception:
                     pass
             raise
         except Exception as err:
@@ -149,24 +155,27 @@ class ArcamDevice(ExternalClientDevice):
         try:
             await asyncio.sleep(0.5)
 
+            # Note: arcam-fmj State getters are synchronous, not async
             if hasattr(self._state, "get_power"):
-                self._power = await self._state.get_power() or False
+                self._power = self._state.get_power() or False
 
             if hasattr(self._state, "get_volume"):
-                raw_volume = await self._state.get_volume()
+                raw_volume = self._state.get_volume()
                 if raw_volume is not None:
                     self._volume = self._arcam_vol_to_percent(raw_volume)
 
             if hasattr(self._state, "get_mute"):
-                self._muted = await self._state.get_mute() or False
+                self._muted = self._state.get_mute() or False
 
             if hasattr(self._state, "get_source"):
-                self._source = await self._state.get_source()
+                source = self._state.get_source()
+                if source is not None:
+                    self._source = source.name if hasattr(source, "name") else str(source)
 
             if hasattr(self._state, "get_source_list"):
-                source_list = await self._state.get_source_list()
+                source_list = self._state.get_source_list()
                 if source_list:
-                    self._source_list = [src.decode() if isinstance(src, bytes) else str(src) for src in source_list]
+                    self._source_list = [src.name if hasattr(src, "name") else str(src) for src in source_list]
 
             _LOG.info("%s Initial state: Power=%s Volume=%d Muted=%s Source=%s",
                      self.log_id, self._power, self._volume, self._muted, self._source)
@@ -184,14 +193,15 @@ class ArcamDevice(ExternalClientDevice):
         try:
             changed = False
 
+            # Note: arcam-fmj State getters are synchronous, not async
             if hasattr(self._state, "get_power"):
-                power = await self._state.get_power()
+                power = self._state.get_power()
                 if power is not None and power != self._power:
                     self._power = power
                     changed = True
 
             if hasattr(self._state, "get_volume"):
-                raw_volume = await self._state.get_volume()
+                raw_volume = self._state.get_volume()
                 if raw_volume is not None:
                     volume = self._arcam_vol_to_percent(raw_volume)
                     if volume != self._volume:
@@ -199,15 +209,16 @@ class ArcamDevice(ExternalClientDevice):
                         changed = True
 
             if hasattr(self._state, "get_mute"):
-                muted = await self._state.get_mute()
+                muted = self._state.get_mute()
                 if muted is not None and muted != self._muted:
                     self._muted = muted
                     changed = True
 
             if hasattr(self._state, "get_source"):
-                source = await self._state.get_source()
-                if source is not None and source != self._source:
-                    self._source = source
+                source = self._state.get_source()
+                source_name = source.name if hasattr(source, "name") else str(source) if source else None
+                if source_name is not None and source_name != self._source:
+                    self._source = source_name
                     changed = True
 
             if changed:
@@ -273,7 +284,7 @@ class ArcamDevice(ExternalClientDevice):
             arcam_vol = self._percent_to_arcam_vol(volume)
             _LOG.info("%s Setting volume to %d (%d raw)", self.log_id, volume, arcam_vol)
             if hasattr(self._state, "set_volume"):
-                await self._state.set_volume(arcam_vol)
+                await self._state.set_volume(int(arcam_vol))  # Must be integer
                 self._volume = volume
                 self._emit_update()
                 return True
@@ -315,7 +326,13 @@ class ArcamDevice(ExternalClientDevice):
         try:
             _LOG.info("%s Selecting source: %s", self.log_id, source)
             if hasattr(self._state, "set_source"):
-                await self._state.set_source(source)
+                # Convert string source name to SourceCodes enum
+                try:
+                    source_enum = SourceCodes[source]
+                except KeyError:
+                    _LOG.error("%s Unknown source: %s", self.log_id, source)
+                    return False
+                await self._state.set_source(source_enum)
                 self._source = source
                 self._emit_update()
                 return True
@@ -324,15 +341,12 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Select source failed: %s", self.log_id, err)
             return False
 
-    def _arcam_vol_to_percent(self, arcam_vol: float) -> int:
-        """Convert Arcam volume (-90.0 to 10.0 dB) to percentage (0-100)."""
-        min_db = -90.0
-        max_db = 10.0
-        clamped = max(min_db, min(max_db, arcam_vol))
-        return int(((clamped - min_db) / (max_db - min_db)) * 100)
+    def _arcam_vol_to_percent(self, arcam_vol: int) -> int:
+        """Convert Arcam raw volume (0-99) to percentage (0-100)."""
+        # Arcam uses 0-99 raw volume range
+        return min(100, max(0, arcam_vol))
 
-    def _percent_to_arcam_vol(self, percent: int) -> float:
-        """Convert percentage (0-100) to Arcam volume (-90.0 to 10.0 dB)."""
-        min_db = -90.0
-        max_db = 10.0
-        return (percent / 100.0) * (max_db - min_db) + min_db
+    def _percent_to_arcam_vol(self, percent: int) -> int:
+        """Convert percentage (0-100) to Arcam raw volume (0-99)."""
+        # Arcam uses 0-99 raw volume range
+        return min(99, max(0, percent))
