@@ -88,22 +88,22 @@ class ArcamDevice(ExternalClientDevice):
         _LOG.info("%s Starting Arcam client", self.log_id)
         await self._client.start()
 
-        _LOG.info("%s Client started, starting state listener", self.log_id)
-        # Start the state listener to receive push updates from the device
-        await self._state.start()
+        _LOG.info("%s Client started, querying device state", self.log_id)
 
         # Query device state and auto-detect device model via AMX Duet
-        # This is CRITICAL: it detects whether device is HDA series, 450 series, etc.
+        # This detects whether device is HDA series, 450 series, etc.
         # and sets the correct API model for RC5 codes
-        _LOG.info("%s Querying device state and detecting model", self.log_id)
-        await self._state.update()
+        # NOTE: This is fault-tolerant - if it fails, we continue with defaults
+        try:
+            await self._state.update()
+            model = self._state.model
+            api_model = self._state._api_model
+            _LOG.info("%s Detected model: %s (API: %s)", self.log_id, model, api_model)
+        except Exception as err:
+            _LOG.warning("%s Failed to query device state: %s (%s). Using defaults.",
+                        self.log_id, err, type(err).__name__)
 
-        # Log detected model
-        model = self._state.model
-        api_model = self._state._api_model
-        _LOG.info("%s Detected model: %s (API: %s)", self.log_id, model, api_model)
-
-        # Initialize local state from queried values
+        # Initialize local state from queried values (or defaults if query failed)
         await self._initialize_state()
 
         # Start background task for periodic state refresh
@@ -119,13 +119,6 @@ class ArcamDevice(ExternalClientDevice):
             except asyncio.CancelledError:
                 pass
             self._maintain_task = None
-
-        # Stop the state listener
-        if self._state:
-            try:
-                await self._state.stop()
-            except Exception as err:
-                _LOG.debug("%s Error stopping state listener: %s", self.log_id, err)
 
         # Stop the client
         if self._client:
