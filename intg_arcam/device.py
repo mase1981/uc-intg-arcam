@@ -89,8 +89,11 @@ class ArcamDevice(ExternalClientDevice):
         _LOG.info("%s Starting Arcam client", self.log_id)
         await self._client.start()
 
-        _LOG.info("%s Client started, starting response processor", self.log_id)
-        self._process_task = asyncio.create_task(self._run_process_loop())
+        _LOG.info("%s Registering state listener", self.log_id)
+        await self._state.start()
+
+        _LOG.info("%s Starting response processor with data listener", self.log_id)
+        self._process_task = asyncio.create_task(self._run_process_loop_with_listener())
 
         await asyncio.sleep(0.5)
 
@@ -143,11 +146,17 @@ class ArcamDevice(ExternalClientDevice):
         """Required by ExternalClientDevice but we use our own background task."""
         pass
 
-    async def _run_process_loop(self) -> None:
-        """Run the arcam-fmj client process loop to read responses."""
+    def _on_data_received(self, packet) -> None:
+        """Callback when data is received from device."""
+        _LOG.debug("%s Data received from device", self.log_id)
+        asyncio.create_task(self._handle_state_update())
+
+    async def _run_process_loop_with_listener(self) -> None:
+        """Run the arcam-fmj client process loop with data listener."""
         try:
-            _LOG.debug("%s Starting client process loop", self.log_id)
-            await self._client.process()
+            _LOG.debug("%s Starting client process loop with listener", self.log_id)
+            with self._client.listen(self._on_data_received):
+                await self._client.process()
         except asyncio.CancelledError:
             _LOG.debug("%s Client process loop cancelled", self.log_id)
             raise
@@ -284,14 +293,18 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Turn on failed: state not initialized", self.log_id)
             return False
         try:
-            _LOG.info("%s Turning on (API model: %s)", self.log_id, self._state._api_model)
+            power_state = self._state.get_power()
+            _LOG.info("%s Turning on (API model: %s, current power state: %s)",
+                     self.log_id, self._state._api_model, power_state)
             await self._state.set_power(True)
             self._power = True
             self._emit_update()
             return True
         except asyncio.TimeoutError:
-            _LOG.error("%s Turn on failed: timeout waiting for device response", self.log_id)
-            return False
+            _LOG.warning("%s Turn on timeout - setting state optimistically", self.log_id)
+            self._power = True
+            self._emit_update()
+            return True
         except Exception as err:
             _LOG.error("%s Turn on failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
@@ -308,8 +321,10 @@ class ArcamDevice(ExternalClientDevice):
             self._emit_update()
             return True
         except asyncio.TimeoutError:
-            _LOG.error("%s Turn off failed: timeout waiting for device response", self.log_id)
-            return False
+            _LOG.warning("%s Turn off timeout - setting state optimistically", self.log_id)
+            self._power = False
+            self._emit_update()
+            return True
         except Exception as err:
             _LOG.error("%s Turn off failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
