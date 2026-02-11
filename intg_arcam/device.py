@@ -90,28 +90,18 @@ class ArcamDevice(ExternalClientDevice):
 
         _LOG.info("%s Client started, querying device state", self.log_id)
 
-        # Query device state and auto-detect device model via AMX Duet
-        # This detects whether device is HDA series, 450 series, etc.
-        # and sets the correct API model for RC5 codes
-        # NOTE: This is fault-tolerant - if it fails, we continue with defaults
         try:
             await self._state.update()
-            model = self._state.model
-            api_model = self._state._api_model
-            _LOG.info("%s Detected model: %s (API: %s)", self.log_id, model, api_model)
+            _LOG.info("%s Detected model: %s (API: %s)",
+                     self.log_id, self._state.model, self._state._api_model)
         except Exception as err:
-            _LOG.warning("%s Failed to query device state: %s (%s). Using defaults.",
-                        self.log_id, err, type(err).__name__)
+            _LOG.warning("%s State query failed: %s, using defaults", self.log_id, err)
 
-        # Initialize local state from queried values (or defaults if query failed)
         await self._initialize_state()
-
-        # Start background task for periodic state refresh
         self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
 
     async def disconnect_client(self) -> None:
         """Disconnect the Arcam client (required by ExternalClientDevice)."""
-        # Stop the maintain task first
         if self._maintain_task and not self._maintain_task.done():
             self._maintain_task.cancel()
             try:
@@ -120,7 +110,6 @@ class ArcamDevice(ExternalClientDevice):
                 pass
             self._maintain_task = None
 
-        # Stop the client
         if self._client:
             _LOG.info("%s Closing client connection", self.log_id)
             try:
@@ -166,38 +155,29 @@ class ArcamDevice(ExternalClientDevice):
                       self.log_id, err, type(err).__name__)
 
     async def _initialize_state(self) -> None:
-        """Initialize local state from already-queried device state."""
+        """Initialize local state from device state."""
         if not self._state:
             return
 
         try:
-            # Note: arcam-fmj State getters are synchronous, not async
-            # At this point, self._state.update() has already been called,
-            # so the state dictionary is populated and model is detected
-
-            # Read power state
             power = self._state.get_power()
             self._power = power if power is not None else False
 
-            # Read volume (Arcam uses 0-99 range)
             raw_volume = self._state.get_volume()
             if raw_volume is not None:
                 self._volume = self._arcam_vol_to_percent(raw_volume)
             else:
                 self._volume = 0
 
-            # Read mute state
             muted = self._state.get_mute()
             self._muted = muted if muted is not None else False
 
-            # Read current source
             source = self._state.get_source()
             if source is not None:
                 self._source = source.name if hasattr(source, "name") else str(source)
             else:
                 self._source = None
 
-            # Get available source list for this device/zone
             source_list = self._state.get_source_list()
             if source_list:
                 self._source_list = [src.name if hasattr(src, "name") else str(src) for src in source_list]
@@ -222,7 +202,6 @@ class ArcamDevice(ExternalClientDevice):
         try:
             changed = False
 
-            # Note: arcam-fmj State getters are synchronous, not async
             if hasattr(self._state, "get_power"):
                 power = self._state.get_power()
                 if power is not None and power != self._power:
@@ -317,7 +296,7 @@ class ArcamDevice(ExternalClientDevice):
         try:
             arcam_vol = self._percent_to_arcam_vol(volume)
             _LOG.info("%s Setting volume to %d (%d raw)", self.log_id, volume, arcam_vol)
-            await self._state.set_volume(int(arcam_vol))  # Must be integer
+            await self._state.set_volume(int(arcam_vol))
             self._volume = volume
             self._emit_update()
             return True
@@ -364,7 +343,6 @@ class ArcamDevice(ExternalClientDevice):
         try:
             _LOG.info("%s Selecting source: %s (API model: %s)",
                      self.log_id, source, self._state._api_model)
-            # Convert string source name to SourceCodes enum
             try:
                 source_enum = SourceCodes[source]
             except KeyError:
@@ -383,11 +361,9 @@ class ArcamDevice(ExternalClientDevice):
             return False
 
     def _arcam_vol_to_percent(self, arcam_vol: int) -> int:
-        """Convert Arcam raw volume (0-99) to percentage (0-100)."""
-        # Arcam uses 0-99 raw volume range
+        """Convert Arcam volume (0-99) to percentage (0-100)."""
         return min(100, max(0, arcam_vol))
 
     def _percent_to_arcam_vol(self, percent: int) -> int:
-        """Convert percentage (0-100) to Arcam raw volume (0-99)."""
-        # Arcam uses 0-99 raw volume range
+        """Convert percentage (0-100) to Arcam volume (0-99)."""
         return min(99, max(0, percent))
