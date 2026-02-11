@@ -30,6 +30,7 @@ class ArcamDevice(ExternalClientDevice):
         self._device_config = device_config
         self._client = None
         self._state = None
+        self._process_task: asyncio.Task | None = None
         self._maintain_task: asyncio.Task | None = None
 
         self._power = False
@@ -88,8 +89,12 @@ class ArcamDevice(ExternalClientDevice):
         _LOG.info("%s Starting Arcam client", self.log_id)
         await self._client.start()
 
-        _LOG.info("%s Client started, querying device state", self.log_id)
+        _LOG.info("%s Client started, starting response processor", self.log_id)
+        self._process_task = asyncio.create_task(self._run_process_loop())
 
+        await asyncio.sleep(0.5)
+
+        _LOG.info("%s Querying device state", self.log_id)
         try:
             await self._state.update()
             _LOG.info("%s Detected model: %s (API: %s)",
@@ -110,6 +115,14 @@ class ArcamDevice(ExternalClientDevice):
                 pass
             self._maintain_task = None
 
+        if self._process_task and not self._process_task.done():
+            self._process_task.cancel()
+            try:
+                await self._process_task
+            except asyncio.CancelledError:
+                pass
+            self._process_task = None
+
         if self._client:
             _LOG.info("%s Closing client connection", self.log_id)
             try:
@@ -124,11 +137,24 @@ class ArcamDevice(ExternalClientDevice):
         """Check if the Arcam client is connected (required by ExternalClientDevice)."""
         if not self._client or not self._state:
             return False
-        return True
+        return self._client.connected
 
     async def maintain_connection(self) -> None:
         """Required by ExternalClientDevice but we use our own background task."""
         pass
+
+    async def _run_process_loop(self) -> None:
+        """Run the arcam-fmj client process loop to read responses."""
+        try:
+            _LOG.debug("%s Starting client process loop", self.log_id)
+            await self._client.process()
+        except asyncio.CancelledError:
+            _LOG.debug("%s Client process loop cancelled", self.log_id)
+            raise
+        except Exception as err:
+            _LOG.warning("%s Client process loop ended: %s (%s)",
+                        self.log_id, err, type(err).__name__)
+            self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
 
     async def _maintain_connection_loop(self) -> None:
         """Background task for periodic state refresh."""
