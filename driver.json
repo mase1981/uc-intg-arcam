@@ -1,6 +1,6 @@
 {
   "driver_id": "arcam",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "min_core_api": "0.22.0",
   "name": {
     "en": "Arcam FMJ"
@@ -14,7 +14,7 @@
     "email": "meir.miyara@gmail.com"
   },
   "home_page": "https://github.com/mase1981/uc-intg-arcam",
-  "release_date": "2026-02-10",
+  "release_date": "2026-02-11",
   "setup_data_schema": {
     "title": {
       "en": "Integration setup"

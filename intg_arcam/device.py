@@ -30,6 +30,7 @@ class ArcamDevice(ExternalClientDevice):
         self._device_config = device_config
         self._client = None
         self._state = None
+        self._maintain_task: asyncio.Task | None = None
 
         self._power = False
         self._volume = 0
@@ -87,11 +88,46 @@ class ArcamDevice(ExternalClientDevice):
         _LOG.info("%s Starting Arcam client", self.log_id)
         await self._client.start()
 
-        _LOG.info("%s Client started, initializing state", self.log_id)
+        _LOG.info("%s Client started, starting state listener", self.log_id)
+        # Start the state listener to receive push updates from the device
+        await self._state.start()
+
+        # Query device state and auto-detect device model via AMX Duet
+        # This is CRITICAL: it detects whether device is HDA series, 450 series, etc.
+        # and sets the correct API model for RC5 codes
+        _LOG.info("%s Querying device state and detecting model", self.log_id)
+        await self._state.update()
+
+        # Log detected model
+        model = self._state.model
+        api_model = self._state._api_model
+        _LOG.info("%s Detected model: %s (API: %s)", self.log_id, model, api_model)
+
+        # Initialize local state from queried values
         await self._initialize_state()
+
+        # Start background task for periodic state refresh
+        self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
 
     async def disconnect_client(self) -> None:
         """Disconnect the Arcam client (required by ExternalClientDevice)."""
+        # Stop the maintain task first
+        if self._maintain_task and not self._maintain_task.done():
+            self._maintain_task.cancel()
+            try:
+                await self._maintain_task
+            except asyncio.CancelledError:
+                pass
+            self._maintain_task = None
+
+        # Stop the state listener
+        if self._state:
+            try:
+                await self._state.stop()
+            except Exception as err:
+                _LOG.debug("%s Error stopping state listener: %s", self.log_id, err)
+
+        # Stop the client
         if self._client:
             _LOG.info("%s Closing client connection", self.log_id)
             try:
@@ -109,81 +145,81 @@ class ArcamDevice(ExternalClientDevice):
         return True
 
     async def maintain_connection(self) -> None:
-        """Monitor connection and update state."""
-        if not self._state:
-            return
+        """Required by ExternalClientDevice but we use our own background task."""
+        pass
+
+    async def _maintain_connection_loop(self) -> None:
+        """Background task for periodic state refresh."""
+        _LOG.info("%s Starting periodic state refresh loop", self.log_id)
 
         try:
-            _LOG.info("%s Starting state monitoring loop", self.log_id)
-
-            # Start the state listener to receive updates from the device
-            await self._state.start()
-
-            # Initial state update
-            await self._state.update()
-            await self._handle_state_update()
-
-            # Periodic state refresh loop
             while True:
                 await asyncio.sleep(30)  # Refresh every 30 seconds
                 if self._state and self._client and self._client.connected:
                     try:
                         await self._state.update()
                         await self._handle_state_update()
+                    except asyncio.TimeoutError:
+                        _LOG.warning("%s State refresh timed out", self.log_id)
                     except Exception as err:
-                        _LOG.debug("%s Error during state refresh: %s", self.log_id, err)
+                        _LOG.debug("%s Error during state refresh: %s (%s)",
+                                  self.log_id, err, type(err).__name__)
 
         except asyncio.CancelledError:
-            _LOG.debug("%s Connection monitoring cancelled", self.log_id)
-            if self._state:
-                try:
-                    await self._state.stop()
-                except Exception:
-                    pass
+            _LOG.debug("%s State refresh loop cancelled", self.log_id)
             raise
         except Exception as err:
-            _LOG.error("%s Error in connection monitoring: %s", self.log_id, err)
-            raise
-        finally:
-            _LOG.debug("%s Exiting connection monitoring", self.log_id)
+            _LOG.error("%s Error in state refresh loop: %s (%s)",
+                      self.log_id, err, type(err).__name__)
 
     async def _initialize_state(self) -> None:
-        """Initialize device state after connection."""
+        """Initialize local state from already-queried device state."""
         if not self._state:
             return
 
         try:
-            await asyncio.sleep(0.5)
-
             # Note: arcam-fmj State getters are synchronous, not async
-            if hasattr(self._state, "get_power"):
-                self._power = self._state.get_power() or False
+            # At this point, self._state.update() has already been called,
+            # so the state dictionary is populated and model is detected
 
-            if hasattr(self._state, "get_volume"):
-                raw_volume = self._state.get_volume()
-                if raw_volume is not None:
-                    self._volume = self._arcam_vol_to_percent(raw_volume)
+            # Read power state
+            power = self._state.get_power()
+            self._power = power if power is not None else False
 
-            if hasattr(self._state, "get_mute"):
-                self._muted = self._state.get_mute() or False
+            # Read volume (Arcam uses 0-99 range)
+            raw_volume = self._state.get_volume()
+            if raw_volume is not None:
+                self._volume = self._arcam_vol_to_percent(raw_volume)
+            else:
+                self._volume = 0
 
-            if hasattr(self._state, "get_source"):
-                source = self._state.get_source()
-                if source is not None:
-                    self._source = source.name if hasattr(source, "name") else str(source)
+            # Read mute state
+            muted = self._state.get_mute()
+            self._muted = muted if muted is not None else False
 
-            if hasattr(self._state, "get_source_list"):
-                source_list = self._state.get_source_list()
-                if source_list:
-                    self._source_list = [src.name if hasattr(src, "name") else str(src) for src in source_list]
+            # Read current source
+            source = self._state.get_source()
+            if source is not None:
+                self._source = source.name if hasattr(source, "name") else str(source)
+            else:
+                self._source = None
 
-            _LOG.info("%s Initial state: Power=%s Volume=%d Muted=%s Source=%s",
-                     self.log_id, self._power, self._volume, self._muted, self._source)
+            # Get available source list for this device/zone
+            source_list = self._state.get_source_list()
+            if source_list:
+                self._source_list = [src.name if hasattr(src, "name") else str(src) for src in source_list]
+            else:
+                self._source_list = []
+
+            _LOG.info("%s Initial state: Power=%s Volume=%d Muted=%s Source=%s Sources=%s",
+                     self.log_id, self._power, self._volume, self._muted, self._source,
+                     self._source_list[:5] if self._source_list else [])
 
             self._emit_update()
 
         except Exception as err:
-            _LOG.warning("%s Failed to initialize state: %s", self.log_id, err)
+            _LOG.warning("%s Failed to initialize state: %s (%s)",
+                        self.log_id, err, type(err).__name__)
 
     async def _handle_state_update(self) -> None:
         """Handle state update from Arcam client."""
@@ -247,50 +283,56 @@ class ArcamDevice(ExternalClientDevice):
     async def turn_on(self) -> bool:
         """Turn device on."""
         if not self._state:
+            _LOG.error("%s Turn on failed: state not initialized", self.log_id)
             return False
         try:
-            _LOG.info("%s Turning on", self.log_id)
-            if hasattr(self._state, "set_power"):
-                await self._state.set_power(True)
-                self._power = True
-                self._emit_update()
-                return True
+            _LOG.info("%s Turning on (API model: %s)", self.log_id, self._state._api_model)
+            await self._state.set_power(True)
+            self._power = True
+            self._emit_update()
+            return True
+        except asyncio.TimeoutError:
+            _LOG.error("%s Turn on failed: timeout waiting for device response", self.log_id)
             return False
         except Exception as err:
-            _LOG.error("%s Turn on failed: %s", self.log_id, err)
+            _LOG.error("%s Turn on failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
     async def turn_off(self) -> bool:
         """Turn device off."""
         if not self._state:
+            _LOG.error("%s Turn off failed: state not initialized", self.log_id)
             return False
         try:
-            _LOG.info("%s Turning off", self.log_id)
-            if hasattr(self._state, "set_power"):
-                await self._state.set_power(False)
-                self._power = False
-                self._emit_update()
-                return True
+            _LOG.info("%s Turning off (API model: %s)", self.log_id, self._state._api_model)
+            await self._state.set_power(False)
+            self._power = False
+            self._emit_update()
+            return True
+        except asyncio.TimeoutError:
+            _LOG.error("%s Turn off failed: timeout waiting for device response", self.log_id)
             return False
         except Exception as err:
-            _LOG.error("%s Turn off failed: %s", self.log_id, err)
+            _LOG.error("%s Turn off failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
     async def set_volume(self, volume: int) -> bool:
         """Set volume level (0-100)."""
         if not self._state:
+            _LOG.error("%s Set volume failed: state not initialized", self.log_id)
             return False
         try:
             arcam_vol = self._percent_to_arcam_vol(volume)
             _LOG.info("%s Setting volume to %d (%d raw)", self.log_id, volume, arcam_vol)
-            if hasattr(self._state, "set_volume"):
-                await self._state.set_volume(int(arcam_vol))  # Must be integer
-                self._volume = volume
-                self._emit_update()
-                return True
+            await self._state.set_volume(int(arcam_vol))  # Must be integer
+            self._volume = volume
+            self._emit_update()
+            return True
+        except asyncio.TimeoutError:
+            _LOG.error("%s Set volume failed: timeout", self.log_id)
             return False
         except Exception as err:
-            _LOG.error("%s Set volume failed: %s", self.log_id, err)
+            _LOG.error("%s Set volume failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
     async def volume_up(self) -> bool:
@@ -306,39 +348,45 @@ class ArcamDevice(ExternalClientDevice):
     async def mute(self, mute: bool) -> bool:
         """Set mute state."""
         if not self._state:
+            _LOG.error("%s Mute failed: state not initialized", self.log_id)
             return False
         try:
             _LOG.info("%s Setting mute to %s", self.log_id, mute)
-            if hasattr(self._state, "set_mute"):
-                await self._state.set_mute(mute)
-                self._muted = mute
-                self._emit_update()
-                return True
+            await self._state.set_mute(mute)
+            self._muted = mute
+            self._emit_update()
+            return True
+        except asyncio.TimeoutError:
+            _LOG.error("%s Mute failed: timeout", self.log_id)
             return False
         except Exception as err:
-            _LOG.error("%s Mute failed: %s", self.log_id, err)
+            _LOG.error("%s Mute failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
     async def select_source(self, source: str) -> bool:
         """Select input source."""
         if not self._state:
+            _LOG.error("%s Select source failed: state not initialized", self.log_id)
             return False
         try:
-            _LOG.info("%s Selecting source: %s", self.log_id, source)
-            if hasattr(self._state, "set_source"):
-                # Convert string source name to SourceCodes enum
-                try:
-                    source_enum = SourceCodes[source]
-                except KeyError:
-                    _LOG.error("%s Unknown source: %s", self.log_id, source)
-                    return False
-                await self._state.set_source(source_enum)
-                self._source = source
-                self._emit_update()
-                return True
+            _LOG.info("%s Selecting source: %s (API model: %s)",
+                     self.log_id, source, self._state._api_model)
+            # Convert string source name to SourceCodes enum
+            try:
+                source_enum = SourceCodes[source]
+            except KeyError:
+                _LOG.error("%s Unknown source: %s. Available: %s",
+                          self.log_id, source, self._source_list)
+                return False
+            await self._state.set_source(source_enum)
+            self._source = source
+            self._emit_update()
+            return True
+        except asyncio.TimeoutError:
+            _LOG.error("%s Select source failed: timeout", self.log_id)
             return False
         except Exception as err:
-            _LOG.error("%s Select source failed: %s", self.log_id, err)
+            _LOG.error("%s Select source failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
     def _arcam_vol_to_percent(self, arcam_vol: int) -> int:
