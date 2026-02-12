@@ -278,7 +278,7 @@ class ArcamDevice(ExternalClientDevice):
         entity_id = f"media_player.{self.identifier}"
 
         update_data = {
-            MediaAttributes.STATE: MediaStates.ON if self._power else MediaStates.STANDBY,
+            MediaAttributes.STATE: MediaStates.ON if self._power else MediaStates.OFF,
             MediaAttributes.VOLUME: self._volume,
             MediaAttributes.MUTED: self._muted,
             MediaAttributes.SOURCE: self._source if self._source else "",
@@ -287,7 +287,7 @@ class ArcamDevice(ExternalClientDevice):
 
         _LOG.debug("%s Emitting update to %s: state=%s vol=%d muted=%s src=%s sources=%s",
                   self.log_id, entity_id,
-                  "ON" if self._power else "STANDBY",
+                  "ON" if self._power else "OFF",
                   self._volume, self._muted, self._source,
                   self._source_list[:3] if self._source_list else [])
 
