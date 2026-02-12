@@ -9,6 +9,7 @@ import asyncio
 import logging
 from typing import Any
 from arcam.fmj import SourceCodes
+from ucapi.media_player import Attributes as MediaAttributes, States as MediaStates
 from ucapi_framework import ExternalClientDevice, DeviceEvents
 from intg_arcam.config import ArcamConfig
 
@@ -274,18 +275,23 @@ class ArcamDevice(ExternalClientDevice):
 
     def _emit_update(self):
         """Emit device state update."""
+        entity_id = f"media_player.{self.identifier}"
+
         update_data = {
-            "state": "ON" if self._power else "OFF",
-            "volume": self._volume,
-            "muted": self._muted,
-            "source": self._source,
+            MediaAttributes.STATE: MediaStates.ON if self._power else MediaStates.STANDBY,
+            MediaAttributes.VOLUME: self._volume,
+            MediaAttributes.MUTED: self._muted,
+            MediaAttributes.SOURCE: self._source if self._source else "",
+            MediaAttributes.SOURCE_LIST: self._source_list,
         }
-        _LOG.debug("%s Emitting update: %s", self.log_id, update_data)
-        self.events.emit(
-            DeviceEvents.UPDATE,
-            self.identifier,
-            update_data
-        )
+
+        _LOG.debug("%s Emitting update to %s: state=%s vol=%d muted=%s src=%s sources=%s",
+                  self.log_id, entity_id,
+                  "ON" if self._power else "STANDBY",
+                  self._volume, self._muted, self._source,
+                  self._source_list[:3] if self._source_list else [])
+
+        self.events.emit(DeviceEvents.UPDATE, entity_id, update_data)
 
     async def turn_on(self) -> bool:
         """Turn device on."""
