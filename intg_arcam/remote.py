@@ -384,7 +384,7 @@ class ArcamRemote(Remote):
         }
 
         self.options = {
-            Options.SIMPLE_COMMANDS: simple_commands,
+            "simple_commands": simple_commands,
             "user_interface": user_interface,
         }
 

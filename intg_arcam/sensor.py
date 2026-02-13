@@ -6,9 +6,8 @@ Arcam FMJ Sensor Entities.
 """
 
 import logging
-from typing import Any
 
-from ucapi.sensor import Attributes, DeviceClasses, Sensor, States
+from ucapi.sensor import Attributes, Sensor, States
 
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
@@ -36,18 +35,10 @@ class ArcamAudioFormatSensor(Sensor):
             entity_name,
             [],
             attributes,
-            device_class=DeviceClasses.CUSTOM,
+            device_class=None,
         )
 
         _LOG.info("[%s] Audio format sensor initialized", entity_id)
-        device.events.on("UPDATE", self._on_device_update)
-
-    async def _on_device_update(self, entity_id: str, update_data: dict[str, Any]) -> None:
-        if entity_id == self.id:
-            if Attributes.VALUE in update_data:
-                self.attributes[Attributes.STATE] = States.ON
-                self.attributes[Attributes.VALUE] = update_data[Attributes.VALUE]
-                _LOG.debug("[%s] Audio format updated to %s", self.id, update_data[Attributes.VALUE])
 
 
 class ArcamSoundModeSensor(Sensor):
@@ -70,15 +61,7 @@ class ArcamSoundModeSensor(Sensor):
             entity_name,
             [],
             attributes,
-            device_class=DeviceClasses.CUSTOM,
+            device_class=None,
         )
 
         _LOG.info("[%s] Sound mode sensor initialized", entity_id)
-        device.events.on("UPDATE", self._on_device_update)
-
-    async def _on_device_update(self, entity_id: str, update_data: dict[str, Any]) -> None:
-        if entity_id == self.id:
-            if Attributes.VALUE in update_data:
-                self.attributes[Attributes.STATE] = States.ON
-                self.attributes[Attributes.VALUE] = update_data[Attributes.VALUE]
-                _LOG.debug("[%s] Sound mode updated to %s", self.id, update_data[Attributes.VALUE])

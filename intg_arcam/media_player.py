@@ -10,7 +10,7 @@ from typing import Any
 from ucapi import StatusCodes
 from ucapi.media_player import (
     Attributes, Commands, DeviceClasses, Features,
-    MediaPlayer, States, Options
+    MediaPlayer, States,
 )
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
@@ -47,7 +47,7 @@ class ArcamMediaPlayer(MediaPlayer):
         }
 
         options = {
-            Options.VOLUME_STEPS: 100
+            "volume_steps": 100
         }
 
         super().__init__(

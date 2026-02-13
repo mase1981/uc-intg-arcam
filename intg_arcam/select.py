@@ -41,17 +41,6 @@ class ArcamSoundModeSelect(Select):
         )
 
         _LOG.info("[%s] Sound mode select entity initialized", self.id)
-        device.events.on("UPDATE", self._on_device_update)
-
-    async def _on_device_update(self, entity_id: str, update_data: dict[str, Any]) -> None:
-        if entity_id == self.id:
-            if Attributes.STATE in update_data:
-                self.attributes[Attributes.STATE] = update_data[Attributes.STATE]
-            if Attributes.CURRENT_OPTION in update_data:
-                self.attributes[Attributes.CURRENT_OPTION] = update_data[Attributes.CURRENT_OPTION]
-            if Attributes.OPTIONS in update_data:
-                self.attributes[Attributes.OPTIONS] = update_data[Attributes.OPTIONS]
-            _LOG.debug("[%s] Sound mode select updated: %s", self.id, update_data)
 
     async def handle_command(
         self, entity: Select, cmd_id: str, params: dict[str, Any] | None
