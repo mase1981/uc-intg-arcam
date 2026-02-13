@@ -6,6 +6,7 @@ Arcam FMJ driver for Unfolded Circle Remote.
 """
 
 import logging
+from ucapi import Entity
 from ucapi_framework import BaseIntegrationDriver
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
@@ -26,11 +27,22 @@ class ArcamDriver(BaseIntegrationDriver[ArcamDevice, ArcamConfig]):
             entity_classes=[
                 ArcamMediaPlayer,
                 ArcamRemote,
-                lambda cfg, dev: [
-                    ArcamAudioFormatSensor(cfg, dev),
-                    ArcamSoundModeSensor(cfg, dev),
-                ],
+                ArcamAudioFormatSensor,
+                ArcamSoundModeSensor,
                 ArcamSoundModeSelect,
             ],
             driver_id="arcam",
         )
+
+    def create_entities(
+        self, device_config: ArcamConfig, device: ArcamDevice
+    ) -> list[Entity]:
+        """Create entity instances."""
+        _LOG.info("Creating entities for %s", device_config.name)
+        return [
+            ArcamMediaPlayer(device_config, device),
+            ArcamRemote(device_config, device),
+            ArcamAudioFormatSensor(device_config, device),
+            ArcamSoundModeSensor(device_config, device),
+            ArcamSoundModeSelect(device_config, device),
+        ]
