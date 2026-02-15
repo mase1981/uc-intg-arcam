@@ -8,49 +8,13 @@ Arcam FMJ Remote Entity.
 import logging
 from typing import Any
 
-from arcam.fmj import CommandCodes
 from ucapi import StatusCodes
 from ucapi.remote import Commands, Features, Options, Remote
 
 from intg_arcam.config import ArcamConfig
-from intg_arcam.device import ArcamDevice
+from intg_arcam.device import ArcamDevice, RC5_COMMANDS
 
 _LOG = logging.getLogger(__name__)
-
-RC5_COMMANDS = {
-    "CURSOR_UP": (0x10, 0x50),
-    "CURSOR_DOWN": (0x10, 0x51),
-    "CURSOR_LEFT": (0x10, 0x55),
-    "CURSOR_RIGHT": (0x10, 0x56),
-    "OK": (0x10, 0x57),
-    "MENU": (0x10, 0x52),
-    "BACK": (0x10, 0x53),
-    "INFO": (0x10, 0x0F),
-    "DISPLAY": (0x10, 0x4D),
-    "MODE": (0x10, 0x43),
-    "DIRECT": (0x10, 0x63),
-    "TUNER_BAND": (0x10, 0x44),
-    "PRESET_UP": (0x10, 0x5E),
-    "PRESET_DOWN": (0x10, 0x5F),
-    "INPUT_CD": (0x10, 0x35),
-    "INPUT_BD": (0x10, 0x36),
-    "INPUT_AV": (0x10, 0x37),
-    "INPUT_SAT": (0x10, 0x38),
-    "INPUT_PVR": (0x10, 0x39),
-    "INPUT_VCR": (0x10, 0x3A),
-    "INPUT_AUX": (0x10, 0x3B),
-    "INPUT_FM": (0x10, 0x3C),
-    "INPUT_DAB": (0x10, 0x3D),
-    "INPUT_NET": (0x10, 0x3E),
-    "INPUT_USB": (0x10, 0x3F),
-    "INPUT_STB": (0x10, 0x7C),
-    "INPUT_GAME": (0x10, 0x7D),
-    "STEREO": (0x10, 0x30),
-    "DOLBY_PLII_MOVIE": (0x10, 0x45),
-    "DOLBY_PLII_MUSIC": (0x10, 0x46),
-    "DTS_NEO6_CINEMA": (0x10, 0x47),
-    "DTS_NEO6_MUSIC": (0x10, 0x48),
-}
 
 
 class ArcamRemote(Remote):
