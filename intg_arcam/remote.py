@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from ucapi import StatusCodes
-from ucapi.remote import Commands, Features, Options, Remote
+from ucapi.remote import Commands, Features, Remote
 
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice, RC5_COMMANDS
@@ -339,17 +339,13 @@ class ArcamRemote(Remote):
             ]
         }
 
-        options = {
-            Options.SIMPLE_COMMANDS: simple_commands,
-            Options.USER_INTERFACE: user_interface,
-        }
-
         super().__init__(
             entity_id,
             entity_name,
             features,
             attributes,
-            options=options,
+            simple_commands=simple_commands,
+            ui_pages=user_interface["pages"],
             cmd_handler=self.handle_command,
         )
 
