@@ -30,14 +30,6 @@ class ArcamRemote(Remote):
         features = [Features.SEND_CMD]
         attributes = {}
 
-        super().__init__(
-            entity_id,
-            entity_name,
-            features,
-            attributes,
-            cmd_handler=self.handle_command,
-        )
-
         simple_commands = [
             "CURSOR_UP",
             "CURSOR_DOWN",
@@ -347,10 +339,19 @@ class ArcamRemote(Remote):
             ]
         }
 
-        self.options = {
-            "simple_commands": simple_commands,
-            "user_interface": user_interface,
+        options = {
+            Options.SIMPLE_COMMANDS: simple_commands,
+            Options.USER_INTERFACE: user_interface,
         }
+
+        super().__init__(
+            entity_id,
+            entity_name,
+            features,
+            attributes,
+            options=options,
+            cmd_handler=self.handle_command,
+        )
 
         _LOG.info("[%s] Remote entity initialized with %d commands", entity_id, len(simple_commands))
 
