@@ -6,16 +6,28 @@ Arcam FMJ device implementation for Unfolded Circle integration.
 """
 
 import asyncio
+import functools
 import logging
+import time
 from typing import Any
-from arcam.fmj import CommandCodes, SourceCodes
+from arcam.fmj import CommandCodes, ResponsePacket, SourceCodes
 from ucapi.media_player import Attributes as MediaAttributes, States as MediaStates
 from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
 from ucapi.select import Attributes as SelectAttributes, States as SelectStates
 from ucapi_framework import ExternalClientDevice, DeviceEvents
-from intg_arcam.config import ArcamConfig
+from intg_arcam.config import ArcamConfig, PollingMode
 
 _LOG = logging.getLogger(__name__)
+
+
+def _tracks_interaction(method):
+    """Decorator to track user interaction timing for poll suppression."""
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        self._last_command_time = time.monotonic()
+        return await method(self, *args, **kwargs)
+    return wrapper
+
 
 RC5_COMMANDS = {
     "CURSOR_UP": (0x10, 0x56),
@@ -70,6 +82,19 @@ class ArcamDevice(ExternalClientDevice):
         self._state = None
         self._process_task: asyncio.Task | None = None
         self._maintain_task: asyncio.Task | None = None
+
+        # Validate polling config
+        try:
+            self._polling_mode = PollingMode(device_config.polling_mode)
+        except ValueError:
+            _LOG.warning("%s Unknown polling_mode '%s', falling back to 'essential'",
+                        f"[{device_config.name} ({device_config.host})]",
+                        device_config.polling_mode)
+            self._polling_mode = PollingMode.ESSENTIAL
+        self._poll_interval = max(30, min(600, device_config.poll_interval))
+
+        self._last_command_time: float = 0.0
+        self._debounce_tasks: dict[int, asyncio.Task] = {}
 
         self._power = False
         self._volume = 0
@@ -159,10 +184,16 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.warning("%s State query failed: %s, using defaults", self.log_id, err)
 
         await self._initialize_state()
-        self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
+        if self._polling_mode != PollingMode.OFF:
+            self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
 
     async def disconnect_client(self) -> None:
         """Disconnect the Arcam client (required by ExternalClientDevice)."""
+        for task in self._debounce_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._debounce_tasks.clear()
+
         if self._maintain_task and not self._maintain_task.done():
             self._maintain_task.cancel()
             try:
@@ -200,9 +231,20 @@ class ArcamDevice(ExternalClientDevice):
         pass
 
     def _on_data_received(self, packet) -> None:
-        """Callback when data is received from device."""
-        _LOG.debug("%s Data received from device", self.log_id)
-        asyncio.create_task(self._handle_state_update())
+        """Callback when data is received from device - debounced per command code."""
+        if not isinstance(packet, ResponsePacket):
+            return
+        existing = self._debounce_tasks.get(packet.cc)
+        if existing and not existing.done():
+            existing.cancel()
+        self._debounce_tasks[packet.cc] = asyncio.create_task(
+            self._debounced_update(packet.cc)
+        )
+
+    async def _debounced_update(self, cc: int) -> None:
+        """Wait for debounce window then emit state update."""
+        await asyncio.sleep(0.08)
+        await self._handle_state_update()
 
     async def _run_process_loop_with_listener(self) -> None:
         """Run the arcam-fmj client process loop with data listener."""
@@ -219,27 +261,54 @@ class ArcamDevice(ExternalClientDevice):
             self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
 
     async def _maintain_connection_loop(self) -> None:
-        """Background task for periodic state refresh."""
-        _LOG.info("%s Starting periodic state refresh loop", self.log_id)
+        """Background task for periodic state refresh, mode-aware."""
+        _LOG.info("%s Starting %s polling loop (interval=%ds)",
+                 self.log_id, self._polling_mode.value, self._poll_interval)
 
         try:
             while True:
-                await asyncio.sleep(30)  # Refresh every 30 seconds
-                if self._state and self._client and self._client.connected:
+                if self._polling_mode == PollingMode.ESSENTIAL:
+                    if self._power:
+                        codes = [CommandCodes.POWER, CommandCodes.VOLUME,
+                                 CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE]
+                    else:
+                        codes = [CommandCodes.POWER]
+
+                    stagger_delay = self._poll_interval / len(codes)
+                    for cc in codes:
+                        await asyncio.sleep(stagger_delay)
+                        if not (self._state and self._client and self._client.connected):
+                            break
+                        if time.monotonic() - self._last_command_time < self._poll_interval * 0.5:
+                            _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
+                            break
+                        try:
+                            await self._client.request(
+                                self._device_config.zone, cc, bytes([0xF0]))
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as err:
+                            _LOG.debug("%s Poll error for %s: %s", self.log_id, cc, err)
+
+                elif self._polling_mode == PollingMode.ALL:
+                    await asyncio.sleep(self._poll_interval)
+                    if not (self._state and self._client and self._client.connected):
+                        continue
+                    if time.monotonic() - self._last_command_time < self._poll_interval * 0.5:
+                        _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
+                        continue
                     try:
                         await self._state.update()
-                        await self._handle_state_update()
-                    except asyncio.TimeoutError:
-                        _LOG.warning("%s State refresh timed out", self.log_id)
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as err:
-                        _LOG.debug("%s Error during state refresh: %s (%s)",
-                                  self.log_id, err, type(err).__name__)
+                        _LOG.debug("%s Poll error: %s", self.log_id, err)
 
         except asyncio.CancelledError:
-            _LOG.debug("%s State refresh loop cancelled", self.log_id)
+            _LOG.debug("%s Polling loop cancelled", self.log_id)
             raise
         except Exception as err:
-            _LOG.error("%s Error in state refresh loop: %s (%s)",
+            _LOG.error("%s Error in polling loop: %s (%s)",
                       self.log_id, err, type(err).__name__)
 
     async def _initialize_state(self) -> None:
@@ -405,6 +474,7 @@ class ArcamDevice(ExternalClientDevice):
         }
         self.events.emit(DeviceEvents.UPDATE, sound_mode_select_id, sound_mode_select_data)
 
+    @_tracks_interaction
     async def turn_on(self) -> bool:
         """Turn device on."""
         if not self._state:
@@ -427,6 +497,7 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Turn on failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
+    @_tracks_interaction
     async def turn_off(self) -> bool:
         """Turn device off."""
         if not self._state:
@@ -447,6 +518,7 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Turn off failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
+    @_tracks_interaction
     async def set_volume(self, volume: int) -> bool:
         """Set volume level (0-100)."""
         if not self._state:
@@ -476,6 +548,7 @@ class ArcamDevice(ExternalClientDevice):
         new_volume = max(0, self._volume - 1)
         return await self.set_volume(new_volume)
 
+    @_tracks_interaction
     async def mute(self, mute: bool) -> bool:
         """Set mute state."""
         if not self._state:
@@ -494,6 +567,7 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Mute failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
+    @_tracks_interaction
     async def select_source(self, source: str) -> bool:
         """Select input source."""
         if not self._state:
@@ -527,6 +601,7 @@ class ArcamDevice(ExternalClientDevice):
         """Convert percentage (0-100) to Arcam volume (0-99)."""
         return min(99, max(0, percent))
 
+    @_tracks_interaction
     async def send_rc5_command(self, command: str) -> bool:
         """Send RC5 IR simulation command."""
         if not self._client:
@@ -554,6 +629,7 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s RC5 command failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
 
+    @_tracks_interaction
     async def set_decode_mode(self, mode: str) -> bool:
         """Set decode/sound mode."""
         if not self._state:
