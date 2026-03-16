@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from ucapi import StatusCodes
-from ucapi.remote import Commands, Features, Remote
+from ucapi.remote import Attributes, Commands, Features, Remote, States
 
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice, RC5_COMMANDS
@@ -27,8 +27,10 @@ class ArcamRemote(Remote):
         entity_id = f"remote.{device_config.identifier}"
         entity_name = f"{device_config.name} Remote"
 
-        features = [Features.SEND_CMD]
-        attributes = {}
+        features = [Features.ON_OFF, Features.SEND_CMD]
+        attributes = {
+            Attributes.STATE: States.UNKNOWN,
+        }
 
         simple_commands = [
             "CURSOR_UP",
@@ -371,6 +373,14 @@ class ArcamRemote(Remote):
         _LOG.info("[%s] Command: %s %s", self.id, cmd_id, params or "")
 
         try:
+            if cmd_id == Commands.ON:
+                success = await self._device.turn_on()
+                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+
+            if cmd_id == Commands.OFF:
+                success = await self._device.turn_off()
+                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+
             if cmd_id != Commands.SEND_CMD:
                 _LOG.warning("[%s] Unsupported command type: %s", self.id, cmd_id)
                 return StatusCodes.NOT_FOUND

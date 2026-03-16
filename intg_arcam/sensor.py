@@ -22,11 +22,11 @@ class ArcamAudioFormatSensor(Sensor):
         self._device = device
         self._device_config = device_config
 
-        entity_id = f"sensor.{device_config.identifier}_audio_format"
+        entity_id = f"sensor.{device_config.identifier}.audio_format"
         entity_name = f"{device_config.name} Audio Format"
 
         attributes = {
-            Attributes.STATE: States.UNAVAILABLE,
+            Attributes.STATE: States.UNKNOWN,
             Attributes.VALUE: "Unknown",
         }
 
@@ -48,11 +48,11 @@ class ArcamSoundModeSensor(Sensor):
         self._device = device
         self._device_config = device_config
 
-        entity_id = f"sensor.{device_config.identifier}_sound_mode"
+        entity_id = f"sensor.{device_config.identifier}.sound_mode"
         entity_name = f"{device_config.name} Sound Mode"
 
         attributes = {
-            Attributes.STATE: States.UNAVAILABLE,
+            Attributes.STATE: States.UNKNOWN,
             Attributes.VALUE: "Unknown",
         }
 

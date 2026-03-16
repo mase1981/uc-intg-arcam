@@ -10,7 +10,15 @@ import functools
 import logging
 import time
 from typing import Any
-from arcam.fmj import CommandCodes, ResponsePacket, SourceCodes
+from arcam.fmj import (
+    CommandCodes, ResponsePacket, SourceCodes,
+    AmxDuetRequest, ResponseException, NotConnectedException,
+    UnsupportedZone, CommandInvalidAtThisTime, CommandNotRecognised,
+    PresetDetail, ApiModel,
+    APIVERSION_450_SERIES, APIVERSION_860_SERIES,
+    APIVERSION_HDA_SERIES, APIVERSION_SA_SERIES,
+    APIVERSION_PA_SERIES, APIVERSION_ST_SERIES,
+)
 from ucapi.media_player import Attributes as MediaAttributes, States as MediaStates
 from ucapi.remote import Attributes as RemoteAttributes, States as RemoteStates
 from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
@@ -98,6 +106,7 @@ class ArcamDevice(ExternalClientDevice):
 
         self._last_command_time: float = 0.0
         self._debounce_tasks: dict[int, asyncio.Task] = {}
+        self._initial_sync_complete: bool = False
 
         self._power = False
         self._volume = 0
@@ -167,6 +176,8 @@ class ArcamDevice(ExternalClientDevice):
 
     async def connect_client(self) -> None:
         """Connect the Arcam client (required by ExternalClientDevice)."""
+        self._initial_sync_complete = False
+
         _LOG.info("%s Starting Arcam client", self.log_id)
         await self._client.start()
 
@@ -178,13 +189,15 @@ class ArcamDevice(ExternalClientDevice):
 
         await asyncio.sleep(0.5)
 
-        _LOG.info("%s Querying device state", self.log_id)
+        _LOG.info("%s Querying device state (sequential)", self.log_id)
         try:
-            await self._arcam_state.update()
+            await self._query_all_state()
             _LOG.info("%s Detected model: %s (API: %s)",
                      self.log_id, self._arcam_state.model, self._arcam_state._api_model)
         except Exception as err:
             _LOG.warning("%s State query failed: %s, using defaults", self.log_id, err)
+        finally:
+            self._initial_sync_complete = True
 
         await self._initialize_state()
         if self._polling_mode != PollingMode.OFF:
@@ -192,6 +205,8 @@ class ArcamDevice(ExternalClientDevice):
 
     async def disconnect_client(self) -> None:
         """Disconnect the Arcam client (required by ExternalClientDevice)."""
+        self._initial_sync_complete = False
+
         for task in self._debounce_tasks.values():
             if not task.done():
                 task.cancel()
@@ -270,6 +285,10 @@ class ArcamDevice(ExternalClientDevice):
 
         try:
             while True:
+                if not self._initial_sync_complete:
+                    await asyncio.sleep(1)
+                    continue
+
                 if self._polling_mode == PollingMode.ESSENTIAL:
                     if self._power:
                         codes = [CommandCodes.POWER, CommandCodes.VOLUME,
@@ -301,7 +320,7 @@ class ArcamDevice(ExternalClientDevice):
                         _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
                         continue
                     try:
-                        await self._arcam_state.update()
+                        await self._query_all_state()
                     except asyncio.CancelledError:
                         raise
                     except Exception as err:
@@ -313,6 +332,109 @@ class ArcamDevice(ExternalClientDevice):
         except Exception as err:
             _LOG.error("%s Error in polling loop: %s (%s)",
                       self.log_id, err, type(err).__name__)
+
+    async def _query_all_state(self) -> None:
+        """Query all device state sequentially to avoid overwhelming the device.
+
+        Replaces arcam-fmj's state.update() which fires 14+ commands via
+        asyncio.gather(), causing timeouts on single-threaded devices.
+        """
+        if not self._client or not self._client.connected:
+            return
+
+        zone = self._device_config.zone
+
+        # 1. Query AMX duet for model detection (affects source list)
+        if self._arcam_state._amxduet is None:
+            try:
+                _LOG.debug("%s Querying AMX duet", self.log_id)
+                data = await self._client.request_raw(AmxDuetRequest())
+                self._arcam_state._amxduet = data
+
+                if data.device_model in APIVERSION_450_SERIES:
+                    self._arcam_state._api_model = ApiModel.API450_SERIES
+                if data.device_model in APIVERSION_860_SERIES:
+                    self._arcam_state._api_model = ApiModel.API860_SERIES
+                if data.device_model in APIVERSION_HDA_SERIES:
+                    self._arcam_state._api_model = ApiModel.APIHDA_SERIES
+                if data.device_model in APIVERSION_SA_SERIES:
+                    self._arcam_state._api_model = ApiModel.APISA_SERIES
+                if data.device_model in APIVERSION_PA_SERIES:
+                    self._arcam_state._api_model = ApiModel.APIPA_SERIES
+                if data.device_model in APIVERSION_ST_SERIES:
+                    self._arcam_state._api_model = ApiModel.APIST_SERIES
+
+            except ResponseException as e:
+                _LOG.debug("%s AMX duet response error: %s", self.log_id, e)
+            except NotConnectedException:
+                _LOG.debug("%s Not connected during AMX duet query", self.log_id)
+                return
+            except asyncio.TimeoutError:
+                _LOG.warning("%s AMX duet query timeout", self.log_id)
+
+        # 2. Query command codes sequentially with delay between each
+        command_codes = [
+            CommandCodes.POWER,
+            CommandCodes.VOLUME,
+            CommandCodes.MUTE,
+            CommandCodes.CURRENT_SOURCE,
+            CommandCodes.MENU,
+            CommandCodes.DECODE_MODE_STATUS_2CH,
+            CommandCodes.DECODE_MODE_STATUS_MCH,
+            CommandCodes.INCOMING_AUDIO_FORMAT,
+            CommandCodes.INCOMING_AUDIO_SAMPLE_RATE,
+            CommandCodes.INCOMING_VIDEO_PARAMETERS,
+            CommandCodes.DAB_STATION,
+            CommandCodes.DLS_PDT_INFO,
+            CommandCodes.RDS_INFORMATION,
+            CommandCodes.TUNER_PRESET,
+        ]
+
+        for cc in command_codes:
+            if not self._client.connected:
+                _LOG.warning("%s Connection lost during state sync", self.log_id)
+                return
+            try:
+                await self._client.request(zone, cc, bytes([0xF0]))
+            except UnsupportedZone:
+                _LOG.debug("%s Unsupported zone for %s", self.log_id, cc)
+            except ResponseException as e:
+                _LOG.debug("%s Response error for %s: %s", self.log_id, cc, e)
+            except NotConnectedException:
+                _LOG.warning("%s Not connected during state sync at %s", self.log_id, cc)
+                return
+            except asyncio.TimeoutError:
+                _LOG.warning("%s Timeout querying %s", self.log_id, cc)
+            await asyncio.sleep(0.3)
+
+        # 3. Query presets 1-50 sequentially
+        presets: dict[int, PresetDetail] = {}
+        for preset_num in range(1, 51):
+            if not self._client.connected:
+                _LOG.warning("%s Connection lost during preset sync", self.log_id)
+                break
+            try:
+                data = await self._client.request(
+                    zone, CommandCodes.PRESET_DETAIL, bytes([preset_num])
+                )
+                if data != b"\x00":
+                    presets[preset_num] = PresetDetail.from_bytes(data)
+            except CommandInvalidAtThisTime:
+                break
+            except CommandNotRecognised:
+                _LOG.debug("%s Presets not supported", self.log_id)
+                break
+            except NotConnectedException:
+                _LOG.warning("%s Not connected during preset sync", self.log_id)
+                break
+            except asyncio.TimeoutError:
+                _LOG.warning("%s Timeout querying preset %d", self.log_id, preset_num)
+                break
+            await asyncio.sleep(0.3)
+        self._arcam_state._presets = presets
+
+        _LOG.info("%s Sequential state sync complete (%d presets found)",
+                 self.log_id, len(presets))
 
     async def _initialize_state(self) -> None:
         """Initialize local state from device state."""
@@ -377,12 +499,21 @@ class ArcamDevice(ExternalClientDevice):
         if not self._arcam_state:
             return
 
+        # Don't emit intermediate states during initial sync;
+        # _initialize_state() will emit the authoritative state after sync.
+        if not self._initial_sync_complete:
+            return
+
         try:
             changed = False
 
+            # Suppress power state changes briefly after user commands to avoid
+            # ON→OFF→ON bounce during device power transitions.
+            command_suppression = time.monotonic() - self._last_command_time < 3.0
+
             if hasattr(self._arcam_state, "get_power"):
                 power = self._arcam_state.get_power()
-                if power is not None and power != self._power:
+                if power is not None and power != self._power and not command_suppression:
                     self._power = power
                     changed = True
 
@@ -457,23 +588,23 @@ class ArcamDevice(ExternalClientDevice):
                   self._volume, self._muted, self._source)
         self.events.emit(DeviceEvents.UPDATE, media_player_id, media_player_data)
 
-        audio_format_id = f"sensor.{self.identifier}_audio_format"
+        audio_format_id = f"sensor.{self.identifier}.audio_format"
         audio_format_data = {
-            SensorAttributes.STATE: SensorStates.ON if self._power else SensorStates.UNAVAILABLE,
-            SensorAttributes.VALUE: self._audio_format if self._audio_format else "Unknown",
+            SensorAttributes.STATE: SensorStates.ON.value,
+            SensorAttributes.VALUE: self._audio_format if self._audio_format else "",
         }
         self.events.emit(DeviceEvents.UPDATE, audio_format_id, audio_format_data)
 
-        sound_mode_sensor_id = f"sensor.{self.identifier}_sound_mode"
+        sound_mode_sensor_id = f"sensor.{self.identifier}.sound_mode"
         sound_mode_sensor_data = {
-            SensorAttributes.STATE: SensorStates.ON if self._power else SensorStates.UNAVAILABLE,
-            SensorAttributes.VALUE: self._sound_mode if self._sound_mode else "Unknown",
+            SensorAttributes.STATE: SensorStates.ON.value,
+            SensorAttributes.VALUE: self._sound_mode if self._sound_mode else "",
         }
         self.events.emit(DeviceEvents.UPDATE, sound_mode_sensor_id, sound_mode_sensor_data)
 
-        sound_mode_select_id = f"select.{self.identifier}_sound_mode"
+        sound_mode_select_id = f"select.{self.identifier}.sound_mode"
         sound_mode_select_data = {
-            SelectAttributes.STATE: SelectStates.ON if self._power else SelectStates.UNAVAILABLE,
+            SelectAttributes.STATE: SelectStates.ON.value,
             SelectAttributes.CURRENT_OPTION: self._sound_mode if self._sound_mode else "",
             SelectAttributes.OPTIONS: self._sound_mode_list,
         }
@@ -481,7 +612,7 @@ class ArcamDevice(ExternalClientDevice):
 
         remote_id = f"remote.{self.identifier}"
         remote_data = {
-            RemoteAttributes.STATE: RemoteStates.ON if self._power else RemoteStates.OFF,
+            RemoteAttributes.STATE: (RemoteStates.ON if self._power else RemoteStates.OFF).value,
         }
         self.events.emit(DeviceEvents.UPDATE, remote_id, remote_data)
 
