@@ -8,7 +8,7 @@ Arcam FMJ setup flow for Unfolded Circle integration.
 import asyncio
 import logging
 from typing import Any
-from ucapi import RequestUserInput, SetupAction, UserDataResponse
+from ucapi import RequestUserInput, SetupAction, SetupError, UserDataResponse
 from ucapi_framework import BaseSetupFlow
 from intg_arcam.config import ArcamConfig, PollingMode
 from intg_arcam.device import ArcamDevice
@@ -21,12 +21,24 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Capture existing config before the framework clears it during setup.
-        # Works for both fresh re-setup and reconfigure/update paths.
         # TODO: ucapi-framework should support non-destructive reconfiguration natively.
         # See: https://github.com/JackJPowell/ucapi-framework/issues/18
+        self._existing_config: ArcamConfig | None = None
+
+    async def _handle_driver_setup_request(self, msg) -> RequestUserInput | SetupError:
+        """Capture existing config before the framework clears it during fresh setup."""
         devices = list(self.config.all())
-        self._existing_config: ArcamConfig | None = devices[0] if devices else None
+        self._existing_config = devices[0] if devices else None
+        _LOG.info("Setup: captured existing config=%s", self._existing_config)
+        return await super()._handle_driver_setup_request(msg)
+
+    async def _handle_configuration_mode(self, msg: UserDataResponse) -> SetupAction:
+        """Capture existing config before the framework removes it during update."""
+        action = msg.input_values.get("action")
+        device_id = msg.input_values.get("choice", "")
+        if action == "update" and device_id:
+            self._existing_config = self.config.get(device_id)
+        return await super()._handle_configuration_mode(msg)
 
     def get_manual_entry_form(self) -> RequestUserInput:
         """Define manual entry fields, pre-populated on reconfiguration."""
