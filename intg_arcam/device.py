@@ -12,6 +12,7 @@ import time
 from typing import Any
 from arcam.fmj import CommandCodes, ResponsePacket, SourceCodes
 from ucapi.media_player import Attributes as MediaAttributes, States as MediaStates
+from ucapi.remote import Attributes as RemoteAttributes, States as RemoteStates
 from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
 from ucapi.select import Attributes as SelectAttributes, States as SelectStates
 from ucapi_framework import ExternalClientDevice, DeviceEvents
@@ -56,6 +57,8 @@ RC5_COMMANDS = {
     "INPUT_NET": (0x10, 0x5C),
     "INPUT_USB": (0x10, 0x5D),
     "INPUT_STB": (0x10, 0x64),
+    "INPUT_UHD": (0x10, 0x7D),
+    "INPUT_BT": (0x10, 0x7A),
     "INPUT_GAME": (0x10, 0x61),
     "STEREO": (0x10, 0x6B),
     "DOLBY_PLII_MOVIE": (0x10, 0x6E),
@@ -79,7 +82,7 @@ class ArcamDevice(ExternalClientDevice):
         )
         self._device_config = device_config
         self._client = None
-        self._state = None
+        self._arcam_state = None
         self._process_task: asyncio.Task | None = None
         self._maintain_task: asyncio.Task | None = None
 
@@ -159,7 +162,7 @@ class ArcamDevice(ExternalClientDevice):
         from arcam.fmj.state import State
 
         self._client = Client(self._device_config.host, self._device_config.port)
-        self._state = State(self._client, self._device_config.zone)
+        self._arcam_state = State(self._client, self._device_config.zone)
         return self._client
 
     async def connect_client(self) -> None:
@@ -168,7 +171,7 @@ class ArcamDevice(ExternalClientDevice):
         await self._client.start()
 
         _LOG.info("%s Registering state listener", self.log_id)
-        await self._state.start()
+        await self._arcam_state.start()
 
         _LOG.info("%s Starting response processor with data listener", self.log_id)
         self._process_task = asyncio.create_task(self._run_process_loop_with_listener())
@@ -177,9 +180,9 @@ class ArcamDevice(ExternalClientDevice):
 
         _LOG.info("%s Querying device state", self.log_id)
         try:
-            await self._state.update()
+            await self._arcam_state.update()
             _LOG.info("%s Detected model: %s (API: %s)",
-                     self.log_id, self._state.model, self._state._api_model)
+                     self.log_id, self._arcam_state.model, self._arcam_state._api_model)
         except Exception as err:
             _LOG.warning("%s State query failed: %s, using defaults", self.log_id, err)
 
@@ -218,11 +221,11 @@ class ArcamDevice(ExternalClientDevice):
                 _LOG.debug("%s Error during client stop: %s", self.log_id, err)
             finally:
                 self._client = None
-                self._state = None
+                self._arcam_state = None
 
     def check_client_connected(self) -> bool:
         """Check if the Arcam client is connected (required by ExternalClientDevice)."""
-        if not self._client or not self._state:
+        if not self._client or not self._arcam_state:
             return False
         return self._client.connected
 
@@ -277,7 +280,7 @@ class ArcamDevice(ExternalClientDevice):
                     stagger_delay = self._poll_interval / len(codes)
                     for cc in codes:
                         await asyncio.sleep(stagger_delay)
-                        if not (self._state and self._client and self._client.connected):
+                        if not (self._arcam_state and self._client and self._client.connected):
                             break
                         if time.monotonic() - self._last_command_time < self._poll_interval * 0.5:
                             _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
@@ -292,13 +295,13 @@ class ArcamDevice(ExternalClientDevice):
 
                 elif self._polling_mode == PollingMode.ALL:
                     await asyncio.sleep(self._poll_interval)
-                    if not (self._state and self._client and self._client.connected):
+                    if not (self._arcam_state and self._client and self._client.connected):
                         continue
                     if time.monotonic() - self._last_command_time < self._poll_interval * 0.5:
                         _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
                         continue
                     try:
-                        await self._state.update()
+                        await self._arcam_state.update()
                     except asyncio.CancelledError:
                         raise
                     except Exception as err:
@@ -313,46 +316,46 @@ class ArcamDevice(ExternalClientDevice):
 
     async def _initialize_state(self) -> None:
         """Initialize local state from device state."""
-        if not self._state:
+        if not self._arcam_state:
             return
 
         try:
-            power = self._state.get_power()
+            power = self._arcam_state.get_power()
             self._power = power if power is not None else False
 
-            raw_volume = self._state.get_volume()
+            raw_volume = self._arcam_state.get_volume()
             if raw_volume is not None:
                 self._volume = self._arcam_vol_to_percent(raw_volume)
             else:
                 self._volume = 0
 
-            muted = self._state.get_mute()
+            muted = self._arcam_state.get_mute()
             self._muted = muted if muted is not None else False
 
-            source = self._state.get_source()
+            source = self._arcam_state.get_source()
             if source is not None:
                 self._source = source.name if hasattr(source, "name") else str(source)
             else:
                 self._source = None
 
-            source_list = self._state.get_source_list()
+            source_list = self._arcam_state.get_source_list()
             if source_list:
                 self._source_list = [src.name if hasattr(src, "name") else str(src) for src in source_list]
             else:
                 self._source_list = []
 
-            if hasattr(self._state, "get_decode_mode"):
-                decode_mode = self._state.get_decode_mode()
+            if hasattr(self._arcam_state, "get_decode_mode"):
+                decode_mode = self._arcam_state.get_decode_mode()
                 if decode_mode is not None:
                     self._sound_mode = decode_mode.name if hasattr(decode_mode, "name") else str(decode_mode)
 
-            if hasattr(self._state, "get_decode_modes"):
-                decode_modes = self._state.get_decode_modes()
+            if hasattr(self._arcam_state, "get_decode_modes"):
+                decode_modes = self._arcam_state.get_decode_modes()
                 if decode_modes:
                     self._sound_mode_list = [m.name if hasattr(m, "name") else str(m) for m in decode_modes]
 
-            if hasattr(self._state, "get_incoming_audio_format"):
-                audio_fmt = self._state.get_incoming_audio_format()
+            if hasattr(self._arcam_state, "get_incoming_audio_format"):
+                audio_fmt = self._arcam_state.get_incoming_audio_format()
                 if audio_fmt and isinstance(audio_fmt, tuple) and len(audio_fmt) >= 2:
                     fmt, config = audio_fmt
                     if fmt is not None:
@@ -371,56 +374,56 @@ class ArcamDevice(ExternalClientDevice):
 
     async def _handle_state_update(self) -> None:
         """Handle state update from Arcam client."""
-        if not self._state:
+        if not self._arcam_state:
             return
 
         try:
             changed = False
 
-            if hasattr(self._state, "get_power"):
-                power = self._state.get_power()
+            if hasattr(self._arcam_state, "get_power"):
+                power = self._arcam_state.get_power()
                 if power is not None and power != self._power:
                     self._power = power
                     changed = True
 
-            if hasattr(self._state, "get_volume"):
-                raw_volume = self._state.get_volume()
+            if hasattr(self._arcam_state, "get_volume"):
+                raw_volume = self._arcam_state.get_volume()
                 if raw_volume is not None:
                     volume = self._arcam_vol_to_percent(raw_volume)
                     if volume != self._volume:
                         self._volume = volume
                         changed = True
 
-            if hasattr(self._state, "get_mute"):
-                muted = self._state.get_mute()
+            if hasattr(self._arcam_state, "get_mute"):
+                muted = self._arcam_state.get_mute()
                 if muted is not None and muted != self._muted:
                     self._muted = muted
                     changed = True
 
-            if hasattr(self._state, "get_source"):
-                source = self._state.get_source()
+            if hasattr(self._arcam_state, "get_source"):
+                source = self._arcam_state.get_source()
                 source_name = source.name if hasattr(source, "name") else str(source) if source else None
                 if source_name is not None and source_name != self._source:
                     self._source = source_name
                     changed = True
 
-            if hasattr(self._state, "get_decode_mode"):
-                decode_mode = self._state.get_decode_mode()
+            if hasattr(self._arcam_state, "get_decode_mode"):
+                decode_mode = self._arcam_state.get_decode_mode()
                 if decode_mode is not None:
                     mode_name = decode_mode.name if hasattr(decode_mode, "name") else str(decode_mode)
                     if mode_name != self._sound_mode:
                         self._sound_mode = mode_name
                         changed = True
 
-            if hasattr(self._state, "get_decode_modes"):
-                decode_modes = self._state.get_decode_modes()
+            if hasattr(self._arcam_state, "get_decode_modes"):
+                decode_modes = self._arcam_state.get_decode_modes()
                 if decode_modes:
                     modes = [m.name if hasattr(m, "name") else str(m) for m in decode_modes]
                     if modes != self._sound_mode_list:
                         self._sound_mode_list = modes
 
-            if hasattr(self._state, "get_incoming_audio_format"):
-                audio_fmt = self._state.get_incoming_audio_format()
+            if hasattr(self._arcam_state, "get_incoming_audio_format"):
+                audio_fmt = self._arcam_state.get_incoming_audio_format()
                 if audio_fmt and isinstance(audio_fmt, tuple) and len(audio_fmt) >= 2:
                     fmt, config = audio_fmt
                     if fmt is not None:
@@ -439,6 +442,8 @@ class ArcamDevice(ExternalClientDevice):
 
     def _emit_update(self):
         """Emit device state update for all entities."""
+        self._state = "ON" if self._power else "OFF"
+
         media_player_id = f"media_player.{self.identifier}"
         media_player_data = {
             MediaAttributes.STATE: MediaStates.ON if self._power else MediaStates.OFF,
@@ -474,17 +479,23 @@ class ArcamDevice(ExternalClientDevice):
         }
         self.events.emit(DeviceEvents.UPDATE, sound_mode_select_id, sound_mode_select_data)
 
+        remote_id = f"remote.{self.identifier}"
+        remote_data = {
+            RemoteAttributes.STATE: RemoteStates.ON if self._power else RemoteStates.OFF,
+        }
+        self.events.emit(DeviceEvents.UPDATE, remote_id, remote_data)
+
     @_tracks_interaction
     async def turn_on(self) -> bool:
         """Turn device on."""
-        if not self._state:
+        if not self._arcam_state:
             _LOG.error("%s Turn on failed: state not initialized", self.log_id)
             return False
         try:
-            power_state = self._state.get_power()
+            power_state = self._arcam_state.get_power()
             _LOG.info("%s Turning on (API model: %s, current power state: %s)",
-                     self.log_id, self._state._api_model, power_state)
-            await self._state.set_power(True)
+                     self.log_id, self._arcam_state._api_model, power_state)
+            await self._arcam_state.set_power(True)
             self._power = True
             self._emit_update()
             return True
@@ -500,12 +511,12 @@ class ArcamDevice(ExternalClientDevice):
     @_tracks_interaction
     async def turn_off(self) -> bool:
         """Turn device off."""
-        if not self._state:
+        if not self._arcam_state:
             _LOG.error("%s Turn off failed: state not initialized", self.log_id)
             return False
         try:
-            _LOG.info("%s Turning off (API model: %s)", self.log_id, self._state._api_model)
-            await self._state.set_power(False)
+            _LOG.info("%s Turning off (API model: %s)", self.log_id, self._arcam_state._api_model)
+            await self._arcam_state.set_power(False)
             self._power = False
             self._emit_update()
             return True
@@ -521,13 +532,13 @@ class ArcamDevice(ExternalClientDevice):
     @_tracks_interaction
     async def set_volume(self, volume: int) -> bool:
         """Set volume level (0-100)."""
-        if not self._state:
+        if not self._arcam_state:
             _LOG.error("%s Set volume failed: state not initialized", self.log_id)
             return False
         try:
             arcam_vol = self._percent_to_arcam_vol(volume)
             _LOG.info("%s Setting volume to %d (%d raw)", self.log_id, volume, arcam_vol)
-            await self._state.set_volume(int(arcam_vol))
+            await self._arcam_state.set_volume(int(arcam_vol))
             self._volume = volume
             self._emit_update()
             return True
@@ -551,12 +562,12 @@ class ArcamDevice(ExternalClientDevice):
     @_tracks_interaction
     async def mute(self, mute: bool) -> bool:
         """Set mute state."""
-        if not self._state:
+        if not self._arcam_state:
             _LOG.error("%s Mute failed: state not initialized", self.log_id)
             return False
         try:
             _LOG.info("%s Setting mute to %s", self.log_id, mute)
-            await self._state.set_mute(mute)
+            await self._arcam_state.set_mute(mute)
             self._muted = mute
             self._emit_update()
             return True
@@ -570,19 +581,19 @@ class ArcamDevice(ExternalClientDevice):
     @_tracks_interaction
     async def select_source(self, source: str) -> bool:
         """Select input source."""
-        if not self._state:
+        if not self._arcam_state:
             _LOG.error("%s Select source failed: state not initialized", self.log_id)
             return False
         try:
             _LOG.info("%s Selecting source: %s (API model: %s)",
-                     self.log_id, source, self._state._api_model)
+                     self.log_id, source, self._arcam_state._api_model)
             try:
                 source_enum = SourceCodes[source]
             except KeyError:
                 _LOG.error("%s Unknown source: %s. Available: %s",
                           self.log_id, source, self._source_list)
                 return False
-            await self._state.set_source(source_enum)
+            await self._arcam_state.set_source(source_enum)
             self._source = source
             self._emit_update()
             return True
@@ -632,13 +643,13 @@ class ArcamDevice(ExternalClientDevice):
     @_tracks_interaction
     async def set_decode_mode(self, mode: str) -> bool:
         """Set decode/sound mode."""
-        if not self._state:
+        if not self._arcam_state:
             _LOG.error("%s Set decode mode failed: state not initialized", self.log_id)
             return False
 
         try:
             _LOG.info("%s Setting decode mode to: %s", self.log_id, mode)
-            await self._state.set_decode_mode(mode)
+            await self._arcam_state.set_decode_mode(mode)
             self._sound_mode = mode
             self._emit_update()
             return True

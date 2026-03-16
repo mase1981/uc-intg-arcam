@@ -21,21 +21,12 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._existing_config: ArcamConfig | None = None
-
-    async def _handle_configuration_mode(self, msg: UserDataResponse) -> SetupAction:
-        """Capture existing config before the framework removes it during update.
-
-        TODO: ucapi-framework should support non-destructive reconfiguration natively.
-        See: https://github.com/JackJPowell/ucapi-framework/issues/18
-        """
-        action = msg.input_values.get("action")
-        device_id = msg.input_values.get("choice", "")
-        if action == "update" and device_id:
-            self._existing_config = self.config.get(device_id)
-        else:
-            self._existing_config = None
-        return await super()._handle_configuration_mode(msg)
+        # Capture existing config before the framework clears it during setup.
+        # Works for both fresh re-setup and reconfigure/update paths.
+        # TODO: ucapi-framework should support non-destructive reconfiguration natively.
+        # See: https://github.com/JackJPowell/ucapi-framework/issues/18
+        devices = list(self.config.all())
+        self._existing_config: ArcamConfig | None = devices[0] if devices else None
 
     def get_manual_entry_form(self) -> RequestUserInput:
         """Define manual entry fields, pre-populated on reconfiguration."""
@@ -72,13 +63,13 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
                 {
                     "id": "info",
                     "label": {"en": "Sync Settings"},
-                    "field": {"label": {"value": (
+                    "field": {"label": {"value": {"en": (
                         "Your Arcam receiver pushes all state changes automatically "
                         "per the Arcam IP protocol. Essential polling adds a lightweight "
                         "safety net (4 queries every 60 seconds). 'None' is safe per "
                         "protocol spec but disables all fail-safe polling. These settings "
                         "can be changed later."
-                    )}},
+                    )}}},
                 },
                 {
                     "id": "polling_mode",
