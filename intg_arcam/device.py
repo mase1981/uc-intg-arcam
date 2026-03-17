@@ -14,7 +14,7 @@ from arcam.fmj import (
     CommandCodes, ResponsePacket, SourceCodes,
     AmxDuetRequest, ResponseException, NotConnectedException,
     UnsupportedZone, CommandInvalidAtThisTime, CommandNotRecognised,
-    PresetDetail, ApiModel,
+    ApiModel,
     APIVERSION_450_SERIES, APIVERSION_860_SERIES,
     APIVERSION_HDA_SERIES, APIVERSION_SA_SERIES,
     APIVERSION_PA_SERIES, APIVERSION_ST_SERIES,
@@ -107,6 +107,11 @@ class ArcamDevice(ExternalClientDevice):
         self._last_command_time: float = 0.0
         self._debounce_tasks: dict[int, asyncio.Task] = {}
         self._initial_sync_complete: bool = False
+        self._trickle_task: asyncio.Task | None = None
+
+        # Staleness tracking — all command codes start stale
+        self._stale: set[CommandCodes] = set()
+        self._mark_all_stale()
 
         self._power = False
         self._volume = 0
@@ -116,6 +121,9 @@ class ArcamDevice(ExternalClientDevice):
         self._sound_mode = None
         self._sound_mode_list = []
         self._audio_format = None
+        self._room_eq = None
+        self._room_eq_index: int = 0
+        self._room_eq_names: dict[int, str] = {}
 
     @property
     def identifier(self) -> str:
@@ -165,6 +173,32 @@ class ArcamDevice(ExternalClientDevice):
     def audio_format(self) -> str | None:
         return self._audio_format
 
+    @property
+    def room_eq(self) -> str | None:
+        return self._room_eq
+
+    # All command codes tracked for staleness (Groups 1, 2, 3)
+    _ALL_TRACKED_COMMANDS: set[CommandCodes] = {
+        # Group 1 — Immediate
+        CommandCodes.POWER, CommandCodes.VOLUME,
+        CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE,
+        # Group 2 — Trickle
+        CommandCodes.DECODE_MODE_STATUS_2CH, CommandCodes.DECODE_MODE_STATUS_MCH,
+        CommandCodes.INCOMING_AUDIO_FORMAT, CommandCodes.INCOMING_AUDIO_SAMPLE_RATE,
+        CommandCodes.ROOM_EQUALIZATION, CommandCodes.ROOM_EQ_NAMES,
+        CommandCodes.MENU,
+        CommandCodes.INCOMING_VIDEO_PARAMETERS,
+        # Group 3 — Tuner
+        CommandCodes.DAB_STATION, CommandCodes.DLS_PDT_INFO,
+        CommandCodes.RDS_INFORMATION, CommandCodes.TUNER_PRESET,
+    }
+
+    _TUNER_SOURCES = {"FM", "DAB"}
+
+    def _mark_all_stale(self) -> None:
+        """Mark all tracked command codes as stale."""
+        self._stale = set(self._ALL_TRACKED_COMMANDS)
+
     async def create_client(self) -> Any:
         """Create the Arcam client (required by ExternalClientDevice)."""
         from arcam.fmj.client import Client
@@ -177,6 +211,7 @@ class ArcamDevice(ExternalClientDevice):
     async def connect_client(self) -> None:
         """Connect the Arcam client (required by ExternalClientDevice)."""
         self._initial_sync_complete = False
+        self._mark_all_stale()
 
         _LOG.info("%s Starting Arcam client", self.log_id)
         await self._client.start()
@@ -189,28 +224,40 @@ class ArcamDevice(ExternalClientDevice):
 
         await asyncio.sleep(0.5)
 
-        _LOG.info("%s Querying device state (sequential)", self.log_id)
+        # Group 0 + Group 1: synchronous immediate sync
+        _LOG.info("%s Syncing immediate state (Group 0+1)", self.log_id)
         try:
-            await self._query_all_state()
-            _LOG.info("%s Detected model: %s (API: %s)",
-                     self.log_id, self._arcam_state.model, self._arcam_state._api_model)
+            await self._sync_immediate_state()
         except Exception as err:
-            _LOG.warning("%s State query failed: %s, using defaults", self.log_id, err)
+            _LOG.warning("%s Immediate state sync failed: %s, using defaults", self.log_id, err)
         finally:
             self._initial_sync_complete = True
 
         await self._initialize_state()
+
+        # Start trickle background task for Groups 2/3/4
+        self._trickle_task = asyncio.create_task(self._trickle_remaining_state())
+
         if self._polling_mode != PollingMode.OFF:
             self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
 
     async def disconnect_client(self) -> None:
         """Disconnect the Arcam client (required by ExternalClientDevice)."""
         self._initial_sync_complete = False
+        self._mark_all_stale()
 
         for task in self._debounce_tasks.values():
             if not task.done():
                 task.cancel()
         self._debounce_tasks.clear()
+
+        if self._trickle_task and not self._trickle_task.done():
+            self._trickle_task.cancel()
+            try:
+                await self._trickle_task
+            except asyncio.CancelledError:
+                pass
+            self._trickle_task = None
 
         if self._maintain_task and not self._maintain_task.done():
             self._maintain_task.cancel()
@@ -227,6 +274,12 @@ class ArcamDevice(ExternalClientDevice):
             except asyncio.CancelledError:
                 pass
             self._process_task = None
+
+        if self._arcam_state:
+            try:
+                await self._arcam_state.stop()
+            except Exception:
+                pass
 
         if self._client:
             _LOG.info("%s Closing client connection", self.log_id)
@@ -252,6 +305,7 @@ class ArcamDevice(ExternalClientDevice):
         """Callback when data is received from device - debounced per command code."""
         if not isinstance(packet, ResponsePacket):
             return
+        self._stale.discard(packet.cc)
         existing = self._debounce_tasks.get(packet.cc)
         if existing and not existing.done():
             existing.cancel()
@@ -285,7 +339,11 @@ class ArcamDevice(ExternalClientDevice):
 
         try:
             while True:
+                # Wait for initial sync (Group 0+1) and trickle to complete
                 if not self._initial_sync_complete:
+                    await asyncio.sleep(1)
+                    continue
+                if self._trickle_task and not self._trickle_task.done():
                     await asyncio.sleep(1)
                     continue
 
@@ -319,12 +377,13 @@ class ArcamDevice(ExternalClientDevice):
                     if time.monotonic() - self._last_command_time < self._poll_interval * 0.5:
                         _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
                         continue
-                    try:
-                        await self._query_all_state()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:
-                        _LOG.debug("%s Poll error: %s", self.log_id, err)
+                    # Query Group 1 directly, then mark remaining stale and re-trickle
+                    for cc in [CommandCodes.POWER, CommandCodes.VOLUME,
+                               CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE]:
+                        if not await self._query_command(cc, delay=0.3):
+                            break
+                    self._mark_all_stale()
+                    self._trickle_task = asyncio.create_task(self._trickle_remaining_state())
 
         except asyncio.CancelledError:
             _LOG.debug("%s Polling loop cancelled", self.log_id)
@@ -333,21 +392,47 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Error in polling loop: %s (%s)",
                       self.log_id, err, type(err).__name__)
 
-    async def _query_all_state(self) -> None:
-        """Query all device state sequentially to avoid overwhelming the device.
+    async def _query_command(self, cc: CommandCodes, delay: float = 0.3) -> bool:
+        """Query a single command code with error handling.
 
-        Replaces arcam-fmj's state.update() which fires 14+ commands via
-        asyncio.gather(), causing timeouts on single-threaded devices.
+        Returns True if query succeeded or was skipped (non-fatal error),
+        False if connection was lost (caller should abort).
+        """
+        if not self._client or not self._client.connected:
+            return False
+        try:
+            await self._client.request(self._device_config.zone, cc, bytes([0xF0]))
+            self._stale.discard(cc)
+        except UnsupportedZone:
+            _LOG.debug("%s Unsupported zone for %s", self.log_id, cc)
+            self._stale.discard(cc)
+        except (CommandNotRecognised, CommandInvalidAtThisTime):
+            _LOG.debug("%s Command not supported: %s", self.log_id, cc)
+            self._stale.discard(cc)
+        except ResponseException as e:
+            _LOG.debug("%s Response error for %s: %s", self.log_id, cc, e)
+        except NotConnectedException:
+            _LOG.warning("%s Not connected querying %s", self.log_id, cc)
+            return False
+        except asyncio.TimeoutError:
+            _LOG.warning("%s Timeout querying %s", self.log_id, cc)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return True
+
+    async def _sync_immediate_state(self) -> None:
+        """Group 0 (AMX duet) + Group 1 (power, volume, mute, source).
+
+        Runs synchronously during connect. After completion, the UI can show
+        meaningful media player state.
         """
         if not self._client or not self._client.connected:
             return
 
-        zone = self._device_config.zone
-
-        # 1. Query AMX duet for model detection (affects source list)
+        # Group 0 — Model detection
         if self._arcam_state._amxduet is None:
             try:
-                _LOG.debug("%s Querying AMX duet", self.log_id)
+                _LOG.debug("%s Group 0: Querying AMX duet", self.log_id)
                 data = await self._client.request_raw(AmxDuetRequest())
                 self._arcam_state._amxduet = data
 
@@ -364,6 +449,8 @@ class ArcamDevice(ExternalClientDevice):
                 if data.device_model in APIVERSION_ST_SERIES:
                     self._arcam_state._api_model = ApiModel.APIST_SERIES
 
+                _LOG.info("%s Detected model: %s (API: %s)",
+                         self.log_id, data.device_model, self._arcam_state._api_model)
             except ResponseException as e:
                 _LOG.debug("%s AMX duet response error: %s", self.log_id, e)
             except NotConnectedException:
@@ -372,69 +459,94 @@ class ArcamDevice(ExternalClientDevice):
             except asyncio.TimeoutError:
                 _LOG.warning("%s AMX duet query timeout", self.log_id)
 
-        # 2. Query command codes sequentially with delay between each
-        command_codes = [
-            CommandCodes.POWER,
-            CommandCodes.VOLUME,
-            CommandCodes.MUTE,
-            CommandCodes.CURRENT_SOURCE,
-            CommandCodes.MENU,
-            CommandCodes.DECODE_MODE_STATUS_2CH,
-            CommandCodes.DECODE_MODE_STATUS_MCH,
-            CommandCodes.INCOMING_AUDIO_FORMAT,
-            CommandCodes.INCOMING_AUDIO_SAMPLE_RATE,
-            CommandCodes.INCOMING_VIDEO_PARAMETERS,
-            CommandCodes.DAB_STATION,
-            CommandCodes.DLS_PDT_INFO,
-            CommandCodes.RDS_INFORMATION,
-            CommandCodes.TUNER_PRESET,
-        ]
-
-        for cc in command_codes:
-            if not self._client.connected:
-                _LOG.warning("%s Connection lost during state sync", self.log_id)
+        # Group 1 — Immediate state
+        _LOG.debug("%s Group 1: Querying power, volume, mute, source", self.log_id)
+        for cc in [CommandCodes.POWER, CommandCodes.VOLUME,
+                    CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE]:
+            if not await self._query_command(cc, delay=0.3):
                 return
-            try:
-                await self._client.request(zone, cc, bytes([0xF0]))
-            except UnsupportedZone:
-                _LOG.debug("%s Unsupported zone for %s", self.log_id, cc)
-            except ResponseException as e:
-                _LOG.debug("%s Response error for %s: %s", self.log_id, cc, e)
-            except NotConnectedException:
-                _LOG.warning("%s Not connected during state sync at %s", self.log_id, cc)
-                return
-            except asyncio.TimeoutError:
-                _LOG.warning("%s Timeout querying %s", self.log_id, cc)
-            await asyncio.sleep(0.3)
 
-        # 3. Query presets 1-50 sequentially
-        presets: dict[int, PresetDetail] = {}
-        for preset_num in range(1, 51):
-            if not self._client.connected:
-                _LOG.warning("%s Connection lost during preset sync", self.log_id)
-                break
-            try:
-                data = await self._client.request(
-                    zone, CommandCodes.PRESET_DETAIL, bytes([preset_num])
-                )
-                if data != b"\x00":
-                    presets[preset_num] = PresetDetail.from_bytes(data)
-            except CommandInvalidAtThisTime:
-                break
-            except CommandNotRecognised:
-                _LOG.debug("%s Presets not supported", self.log_id)
-                break
-            except NotConnectedException:
-                _LOG.warning("%s Not connected during preset sync", self.log_id)
-                break
-            except asyncio.TimeoutError:
-                _LOG.warning("%s Timeout querying preset %d", self.log_id, preset_num)
-                break
-            await asyncio.sleep(0.3)
-        self._arcam_state._presets = presets
+        _LOG.info("%s Immediate state sync complete", self.log_id)
 
-        _LOG.info("%s Sequential state sync complete (%d presets found)",
-                 self.log_id, len(presets))
+    async def _trickle_remaining_state(self) -> None:
+        """Background task: Groups 2 (trickle), 3 (tuner), 4 (presets).
+
+        Queries remaining state with staleness checks — push events that
+        arrive during trickle automatically skip redundant queries.
+        """
+        try:
+            # Group 2 — Trickle by importance
+            _LOG.debug("%s Group 2: Trickling secondary state", self.log_id)
+            for cc in [
+                CommandCodes.DECODE_MODE_STATUS_2CH,
+                CommandCodes.DECODE_MODE_STATUS_MCH,
+                CommandCodes.INCOMING_AUDIO_FORMAT,
+                CommandCodes.INCOMING_AUDIO_SAMPLE_RATE,
+                CommandCodes.ROOM_EQUALIZATION,
+                CommandCodes.ROOM_EQ_NAMES,
+                CommandCodes.MENU,
+                CommandCodes.INCOMING_VIDEO_PARAMETERS,
+            ]:
+                if cc not in self._stale:
+                    continue
+                if not await self._query_command(cc, delay=0.4):
+                    return
+
+            # Parse room EQ names if available, update display
+            self._parse_room_eq_names()
+            if self._room_eq_index > 0:
+                new_display = self._format_room_eq(self._room_eq_index)
+                if new_display != self._room_eq:
+                    self._room_eq = new_display
+                    self._emit_update()
+
+            # Group 3 — Tuner (conditional)
+            if self._source in self._TUNER_SOURCES:
+                _LOG.debug("%s Group 3: Trickling tuner state", self.log_id)
+                for cc in [
+                    CommandCodes.DAB_STATION,
+                    CommandCodes.DLS_PDT_INFO,
+                    CommandCodes.RDS_INFORMATION,
+                    CommandCodes.TUNER_PRESET,
+                ]:
+                    if self._source not in self._TUNER_SOURCES:
+                        _LOG.debug("%s Group 3: Source changed away from tuner, aborting", self.log_id)
+                        break
+                    if cc not in self._stale:
+                        continue
+                    if not await self._query_command(cc, delay=0.4):
+                        return
+
+            _LOG.info("%s Trickle state sync complete", self.log_id)
+
+        except asyncio.CancelledError:
+            _LOG.debug("%s Trickle task cancelled", self.log_id)
+            raise
+        except Exception as err:
+            _LOG.error("%s Error in trickle sync: %s (%s)",
+                      self.log_id, err, type(err).__name__)
+
+    async def _trickle_tuner_state(self) -> None:
+        """Background task: query Group 3 tuner state only."""
+        try:
+            _LOG.debug("%s Trickling tuner state (runtime trigger)", self.log_id)
+            for cc in [
+                CommandCodes.DAB_STATION, CommandCodes.DLS_PDT_INFO,
+                CommandCodes.RDS_INFORMATION, CommandCodes.TUNER_PRESET,
+            ]:
+                if self._source not in self._TUNER_SOURCES:
+                    _LOG.debug("%s Source changed away from tuner, aborting", self.log_id)
+                    break
+                if cc not in self._stale:
+                    continue
+                if not await self._query_command(cc, delay=0.4):
+                    return
+        except asyncio.CancelledError:
+            _LOG.debug("%s Tuner trickle cancelled", self.log_id)
+            raise
+        except Exception as err:
+            _LOG.error("%s Error in tuner trickle: %s (%s)",
+                      self.log_id, err, type(err).__name__)
 
     async def _initialize_state(self) -> None:
         """Initialize local state from device state."""
@@ -483,6 +595,11 @@ class ArcamDevice(ExternalClientDevice):
                     if fmt is not None:
                         fmt_name = fmt.name if hasattr(fmt, "name") else str(fmt)
                         self._audio_format = fmt_name
+
+            room_eq_data = self._arcam_state._state.get(CommandCodes.ROOM_EQUALIZATION)
+            if room_eq_data is not None:
+                self._room_eq_index = int.from_bytes(room_eq_data, "big")
+                self._room_eq = self._format_room_eq(self._room_eq_index)
 
             _LOG.info("%s Initial state: Power=%s Volume=%d Muted=%s Source=%s Sources=%s",
                      self.log_id, self._power, self._volume, self._muted, self._source,
@@ -535,8 +652,23 @@ class ArcamDevice(ExternalClientDevice):
                 source = self._arcam_state.get_source()
                 source_name = source.name if hasattr(source, "name") else str(source) if source else None
                 if source_name is not None and source_name != self._source:
+                    old_source = self._source
                     self._source = source_name
                     changed = True
+                    # Trigger Group 3 trickle if switched to tuner and trickle is not running
+                    if (source_name in self._TUNER_SOURCES
+                            and (old_source is None or old_source not in self._TUNER_SOURCES)
+                            and (self._trickle_task is None or self._trickle_task.done())):
+                        tuner_stale = any(cc in self._stale for cc in [
+                            CommandCodes.DAB_STATION, CommandCodes.DLS_PDT_INFO,
+                            CommandCodes.RDS_INFORMATION, CommandCodes.TUNER_PRESET,
+                        ])
+                        if tuner_stale:
+                            _LOG.debug("%s Source changed to tuner, triggering Group 3 trickle",
+                                      self.log_id)
+                            self._trickle_task = asyncio.create_task(
+                                self._trickle_tuner_state()
+                            )
 
             if hasattr(self._arcam_state, "get_decode_mode"):
                 decode_mode = self._arcam_state.get_decode_mode()
@@ -562,6 +694,15 @@ class ArcamDevice(ExternalClientDevice):
                         if fmt_name != self._audio_format:
                             self._audio_format = fmt_name
                             changed = True
+
+            room_eq_data = self._arcam_state._state.get(CommandCodes.ROOM_EQUALIZATION)
+            if room_eq_data is not None:
+                idx = int.from_bytes(room_eq_data, "big")
+                self._room_eq_index = idx
+                room_eq = self._format_room_eq(idx)
+                if room_eq != self._room_eq:
+                    self._room_eq = room_eq
+                    changed = True
 
             if changed:
                 _LOG.debug("%s State updated: Power=%s Volume=%d Muted=%s Source=%s",
@@ -595,6 +736,13 @@ class ArcamDevice(ExternalClientDevice):
         }
         self.events.emit(DeviceEvents.UPDATE, audio_format_id, audio_format_data)
 
+        room_eq_id = f"sensor.{self.identifier}.room_eq"
+        room_eq_data = {
+            SensorAttributes.STATE: SensorStates.ON.value,
+            SensorAttributes.VALUE: self._room_eq if self._room_eq else "",
+        }
+        self.events.emit(DeviceEvents.UPDATE, room_eq_id, room_eq_data)
+
         sound_mode_sensor_id = f"sensor.{self.identifier}.sound_mode"
         sound_mode_sensor_data = {
             SensorAttributes.STATE: SensorStates.ON.value,
@@ -615,6 +763,34 @@ class ArcamDevice(ExternalClientDevice):
             RemoteAttributes.STATE: (RemoteStates.ON if self._power else RemoteStates.OFF).value,
         }
         self.events.emit(DeviceEvents.UPDATE, remote_id, remote_data)
+
+    def _format_room_eq(self, index: int) -> str | None:
+        """Format room EQ index as a display string, using name if available.
+
+        Returns None if the name is not yet known (waiting for ROOM_EQ_NAMES).
+        """
+        if index == 0:
+            return "Off"
+        return self._room_eq_names.get(index)
+
+    def _parse_room_eq_names(self) -> None:
+        """Parse room EQ names from state data (0x34 response).
+
+        Response contains up to 3 names of 20 ASCII characters each,
+        packed into a single response (20, 40, or 60 bytes total).
+        """
+        data = self._arcam_state._state.get(CommandCodes.ROOM_EQ_NAMES)
+        if not data:
+            return
+        names: dict[int, str] = {}
+        for i in range(min(3, len(data) // 20)):
+            chunk = data[i * 20:(i + 1) * 20]
+            name = chunk.decode("ascii", errors="replace").rstrip("\x00").strip()
+            if name:
+                names[i + 1] = name
+        if names != self._room_eq_names:
+            self._room_eq_names = names
+            _LOG.info("%s Room EQ names: %s", self.log_id, names)
 
     @_tracks_interaction
     async def turn_on(self) -> bool:

@@ -11,7 +11,7 @@ from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
 from intg_arcam.media_player import ArcamMediaPlayer
 from intg_arcam.remote import ArcamRemote
-from intg_arcam.sensor import ArcamAudioFormatSensor, ArcamSoundModeSensor
+from intg_arcam.sensor import ArcamAudioFormatSensor, ArcamSoundModeSensor, ArcamRoomEqSensor
 from intg_arcam.select import ArcamSoundModeSelect
 
 _LOG = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ class ArcamDriver(BaseIntegrationDriver[ArcamDevice, ArcamConfig]):
                 lambda cfg, dev: [
                     ArcamAudioFormatSensor(cfg, dev),
                     ArcamSoundModeSensor(cfg, dev),
+                    ArcamRoomEqSensor(cfg, dev),
                 ],
                 ArcamSoundModeSelect,
             ],

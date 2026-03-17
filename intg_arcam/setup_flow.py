@@ -76,11 +76,10 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
                     "id": "info",
                     "label": {"en": "Sync Settings"},
                     "field": {"label": {"value": {"en": (
-                        "Your Arcam receiver pushes all state changes automatically "
-                        "per the Arcam IP protocol. Essential polling adds a lightweight "
-                        "safety net (4 queries every 60 seconds). 'None' is safe per "
-                        "protocol spec but disables all fail-safe polling. These settings "
-                        "can be changed later."
+                        "Your Arcam receiver pushes state changes automatically. "
+                        "Initial state is synced progressively on connect. "
+                        "The polling mode controls optional periodic re-checks "
+                        "as a safety net. These settings can be changed later."
                     )}}},
                 },
                 {
@@ -91,15 +90,15 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
                         "items": [
                             {
                                 "id": "essential",
-                                "label": {"en": "Essential - poll key states as fail-safe (recommended)"},
+                                "label": {"en": "Essential - periodic check of key states (recommended)"},
                             },
                             {
                                 "id": "off",
-                                "label": {"en": "None - rely on push events only"},
+                                "label": {"en": "None - rely on push events only after initial sync"},
                             },
                             {
                                 "id": "all",
-                                "label": {"en": "All - poll all states (heavy, includes tuner/presets)"},
+                                "label": {"en": "All - periodic full state resync"},
                             },
                         ],
                     }},
@@ -137,7 +136,6 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
             polling_mode = "essential"
         poll_interval = int(input_values.get("poll_interval", 60))
         poll_interval = max(30, min(600, poll_interval))
-
         _LOG.info("Testing connection to Arcam at %s:%d zone %d", host, port, zone)
 
         try:
