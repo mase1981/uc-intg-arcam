@@ -29,12 +29,49 @@ __all__ = ["__version__"]
 _LOG = logging.getLogger(__name__)
 
 
+class JournaldFormatter(logging.Formatter):
+    """Formatter for journald. Prefixes messages with syslog priority level.
+
+    DEBUG app messages are logged with priority 6 (info) and INFO with priority
+    5 (notice). This is a workaround until the log subsystem on the Remote is
+    updated to support debug levels.
+    """
+
+    PRIORITY_MAP = {
+        logging.DEBUG: "<6>",     # SD_INFO
+        logging.INFO: "<5>",      # SD_NOTICE
+        logging.WARNING: "<4>",   # SD_WARNING
+        logging.ERROR: "<3>",     # SD_ERR
+        logging.CRITICAL: "<2>",  # SD_CRIT
+    }
+
+    def format(self, record):
+        """Format the log record with journald priority prefix."""
+        priority = self.PRIORITY_MAP.get(record.levelno, "<6>")
+        return f"{priority}{record.name}: {record.getMessage()}"
+
+
 async def main():
     """Main entry point."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s"
-    )
+    # Systemd/journald detection: INVOCATION_ID is set by systemd when running
+    # as a service on the UC Remote.
+    if os.getenv("INVOCATION_ID"):
+        handler = logging.StreamHandler()
+        handler.setFormatter(JournaldFormatter())
+        logging.basicConfig(handlers=[handler])
+    else:
+        logging.basicConfig(
+            format="%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s.%(funcName)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+    level = os.getenv("UC_LOG_LEVEL", "DEBUG").upper()
+    logging.getLogger("intg_arcam").setLevel(level)
+    # arcam.fmj pinned to INFO: only 4 statements (connect/disconnect lifecycle),
+    # avoids per-packet DEBUG noise while retaining useful operational events.
+    logging.getLogger("arcam.fmj").setLevel(logging.INFO)
+    # ucapi and ucapi_framework are left at root default (WARNING).
+    # Official UC integrations don't override these.
 
     _LOG.info("Starting Arcam FMJ Integration v%s", __version__)
 
