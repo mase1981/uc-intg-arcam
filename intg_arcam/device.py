@@ -731,21 +731,21 @@ class ArcamDevice(ExternalClientDevice):
 
         audio_format_id = f"sensor.{self.identifier}.audio_format"
         audio_format_data = {
-            SensorAttributes.STATE: SensorStates.ON.value,
+            SensorAttributes.STATE: SensorStates.ON.value if self._audio_format else SensorStates.UNKNOWN.value,
             SensorAttributes.VALUE: self._audio_format if self._audio_format else "",
         }
         self.events.emit(DeviceEvents.UPDATE, audio_format_id, audio_format_data)
 
         room_eq_id = f"sensor.{self.identifier}.room_eq"
         room_eq_data = {
-            SensorAttributes.STATE: SensorStates.ON.value,
+            SensorAttributes.STATE: SensorStates.ON.value if self._room_eq else SensorStates.UNKNOWN.value,
             SensorAttributes.VALUE: self._room_eq if self._room_eq else "",
         }
         self.events.emit(DeviceEvents.UPDATE, room_eq_id, room_eq_data)
 
         sound_mode_sensor_id = f"sensor.{self.identifier}.sound_mode"
         sound_mode_sensor_data = {
-            SensorAttributes.STATE: SensorStates.ON.value,
+            SensorAttributes.STATE: SensorStates.ON.value if self._sound_mode else SensorStates.UNKNOWN.value,
             SensorAttributes.VALUE: self._sound_mode if self._sound_mode else "",
         }
         self.events.emit(DeviceEvents.UPDATE, sound_mode_sensor_id, sound_mode_sensor_data)
