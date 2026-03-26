@@ -107,6 +107,7 @@ class ArcamDevice(ExternalClientDevice):
         self._last_command_time: float = 0.0
         self._debounce_tasks: dict[int, asyncio.Task] = {}
         self._initial_sync_complete: bool = False
+        self._model_detected: bool = False
         self._trickle_task: asyncio.Task | None = None
 
         # Staleness tracking — all command codes start stale
@@ -216,6 +217,7 @@ class ArcamDevice(ExternalClientDevice):
     async def connect_client(self) -> None:
         """Connect the Arcam client (required by ExternalClientDevice)."""
         self._initial_sync_complete = False
+        self._model_detected = False
         self._mark_all_stale()
 
         _LOG.info("%s Starting Arcam client", self.log_id)
@@ -249,6 +251,7 @@ class ArcamDevice(ExternalClientDevice):
     async def disconnect_client(self) -> None:
         """Disconnect the Arcam client (required by ExternalClientDevice)."""
         self._initial_sync_complete = False
+        self._model_detected = False
         self._mark_all_stale()
 
         for task in self._debounce_tasks.values():
@@ -425,6 +428,33 @@ class ArcamDevice(ExternalClientDevice):
             await asyncio.sleep(delay)
         return True
 
+    def _map_model_from_amx(self, data) -> bool:
+        """Map an AMX duet response to an API model series.
+
+        Matches the device_model string from the AMX response against the
+        known model sets in the arcam-fmj library. Sets _api_model on the
+        State object and _model_detected on this device.
+
+        Returns True if the model string matched a known series.
+        """
+        model = data.device_model
+        if model in APIVERSION_450_SERIES:
+            self._arcam_state._api_model = ApiModel.API450_SERIES
+        elif model in APIVERSION_860_SERIES:
+            self._arcam_state._api_model = ApiModel.API860_SERIES
+        elif model in APIVERSION_HDA_SERIES:
+            self._arcam_state._api_model = ApiModel.APIHDA_SERIES
+        elif model in APIVERSION_SA_SERIES:
+            self._arcam_state._api_model = ApiModel.APISA_SERIES
+        elif model in APIVERSION_PA_SERIES:
+            self._arcam_state._api_model = ApiModel.APIPA_SERIES
+        elif model in APIVERSION_ST_SERIES:
+            self._arcam_state._api_model = ApiModel.APIST_SERIES
+        else:
+            return False
+        self._model_detected = True
+        return True
+
     async def _sync_immediate_state(self) -> None:
         """Group 0 (AMX duet) + Group 1 (power, volume, mute, source).
 
@@ -435,34 +465,121 @@ class ArcamDevice(ExternalClientDevice):
             return
 
         # Group 0 — Model detection
-        if self._arcam_state._amxduet is None:
-            try:
-                _LOG.debug("%s Group 0: Querying AMX duet", self.log_id)
-                data = await self._client.request_raw(AmxDuetRequest())
-                self._arcam_state._amxduet = data
+        #
+        # Determines the receiver's protocol series (450, 860, HDA, SA, PA, ST),
+        # which controls source codes, RC5 command tables, and available features.
+        # Getting this wrong means every source switch and mode change sends the
+        # wrong RC5 code, and HDA-only sources like UHD become unavailable.
+        #
+        # Three detection methods are tried in order:
+        #
+        #   1. AMX beacon — the receiver may have already sent an unsolicited
+        #      beacon that State._listen() stored in _amxduet. However, _listen()
+        #      does NOT map _api_model from the beacon data, so we must do it here.
+        #      Without this step, a beacon arriving before Group 0 would cause
+        #      detection to be silently skipped (the old bug).
+        #
+        #   2. AMX duet query — direct request/response. Some receivers (e.g. JBL
+        #      Synthesis SDP-58) don't respond to direct queries but do send
+        #      periodic beacons. If a beacon happens to arrive during the 6-second
+        #      request window, the library treats it as the response (any
+        #      AmxDuetResponse resolves any AmxDuetRequest). This is why detection
+        #      was intermittent before — it depended on beacon timing.
+        #
+        #   3. Capability probe — send SETUP (0x27), an HDA-specific command.
+        #      If the receiver responds, it supports HDA commands → HDA series.
+        #      If it responds with CommandNotRecognised, it doesn't → non-HDA.
+        #      This is the reliable fallback for receivers where AMX duet is
+        #      completely unavailable.
+        #
+        # If all three fail, _api_model stays at the library default (API450_SERIES).
 
-                if data.device_model in APIVERSION_450_SERIES:
-                    self._arcam_state._api_model = ApiModel.API450_SERIES
-                elif data.device_model in APIVERSION_860_SERIES:
-                    self._arcam_state._api_model = ApiModel.API860_SERIES
-                elif data.device_model in APIVERSION_HDA_SERIES:
+        if self._model_detected:
+            _LOG.debug("%s Model already detected (%s), skipping Group 0",
+                      self.log_id, self._arcam_state._api_model)
+        else:
+
+            # Step 1: Check for AMX beacon already received by State._listen()
+            if self._arcam_state._amxduet is not None:
+                if self._map_model_from_amx(self._arcam_state._amxduet):
+                    _LOG.info("%s Model detected via AMX beacon: %s → %s",
+                             self.log_id,
+                             self._arcam_state._amxduet.device_model,
+                             self._arcam_state._api_model)
+
+            # Step 2: AMX duet query (only if no beacon resolved the model)
+            if not self._model_detected:
+                try:
+                    _LOG.debug("%s Querying AMX duet", self.log_id)
+                    data = await self._client.request_raw(AmxDuetRequest())
+                    self._arcam_state._amxduet = data
+                    if self._map_model_from_amx(data):
+                        _LOG.info("%s Model detected via AMX query: %s → %s",
+                                 self.log_id, data.device_model,
+                                 self._arcam_state._api_model)
+                    else:
+                        _LOG.warning(
+                            "%s AMX duet returned unrecognized model: '%s'",
+                            self.log_id, data.device_model)
+                except ResponseException as e:
+                    _LOG.debug("%s AMX duet response error: %s", self.log_id, e)
+                except NotConnectedException:
+                    _LOG.debug("%s Not connected during AMX duet query",
+                              self.log_id)
+                    return
+                except asyncio.TimeoutError:
+                    _LOG.debug("%s AMX duet query timeout, will try probe",
+                              self.log_id)
+
+            # Step 3: Capability probe — send HDA-specific SETUP command (0x27).
+            # This reliably distinguishes HDA receivers from non-HDA when AMX
+            # duet is unavailable. Non-HDA receivers reject the command with
+            # CommandNotRecognised; HDA receivers return setup data.
+            if not self._model_detected:
+                try:
+                    _LOG.debug("%s Probing with SETUP command (HDA-specific)",
+                              self.log_id)
+                    await self._client.request(
+                        self._device_config.zone,
+                        CommandCodes.SETUP, bytes([0xF0]))
                     self._arcam_state._api_model = ApiModel.APIHDA_SERIES
-                elif data.device_model in APIVERSION_SA_SERIES:
-                    self._arcam_state._api_model = ApiModel.APISA_SERIES
-                elif data.device_model in APIVERSION_PA_SERIES:
-                    self._arcam_state._api_model = ApiModel.APIPA_SERIES
-                elif data.device_model in APIVERSION_ST_SERIES:
-                    self._arcam_state._api_model = ApiModel.APIST_SERIES
+                    self._model_detected = True
+                    _LOG.info("%s Model detected via probe: "
+                             "SETUP command responded → HDA series",
+                             self.log_id)
+                except CommandNotRecognised:
+                    # Receiver explicitly rejected the HDA command — it's not
+                    # HDA. The API450_SERIES default is the best remaining guess.
+                    self._model_detected = True
+                    _LOG.info("%s Model probe: SETUP rejected "
+                             "(CommandNotRecognised) → non-HDA, "
+                             "using default %s",
+                             self.log_id, self._arcam_state._api_model)
+                except CommandInvalidAtThisTime:
+                    # Receiver knows the command but can't handle it right now
+                    # (e.g. during boot). Treat as HDA since it recognized it.
+                    self._arcam_state._api_model = ApiModel.APIHDA_SERIES
+                    self._model_detected = True
+                    _LOG.info("%s Model detected via probe: "
+                             "SETUP returned CommandInvalidAtThisTime → "
+                             "HDA series (command recognized)",
+                             self.log_id)
+                except (asyncio.TimeoutError, ResponseException) as e:
+                    _LOG.warning("%s Model probe failed: %s (%s), "
+                                "using default %s", self.log_id,
+                                e, type(e).__name__,
+                                self._arcam_state._api_model)
+                except NotConnectedException:
+                    _LOG.debug("%s Not connected during model probe",
+                              self.log_id)
+                    return
 
-                _LOG.info("%s Detected model: %s (API: %s)",
-                         self.log_id, data.device_model, self._arcam_state._api_model)
-            except ResponseException as e:
-                _LOG.debug("%s AMX duet response error: %s", self.log_id, e)
-            except NotConnectedException:
-                _LOG.debug("%s Not connected during AMX duet query", self.log_id)
-                return
-            except asyncio.TimeoutError:
-                _LOG.warning("%s AMX duet query timeout", self.log_id)
+            # Summary log — always emitted so every connect shows the model
+            model_name = (self._arcam_state._amxduet.device_model
+                          if self._arcam_state._amxduet else "unknown")
+            _LOG.info("%s Model detection complete: %s → %s",
+                     self.log_id, model_name,
+                     self._arcam_state._api_model)
 
         # Group 1 — Immediate state
         _LOG.debug("%s Group 1: Querying power, volume, mute, source", self.log_id)
