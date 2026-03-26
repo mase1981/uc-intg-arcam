@@ -76,10 +76,13 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
                     "id": "info",
                     "label": {"en": "Sync Settings"},
                     "field": {"label": {"value": {"en": (
-                        "Your Arcam receiver pushes state changes automatically. "
-                        "Initial state is synced progressively on connect. "
-                        "The polling mode controls optional periodic re-checks "
-                        "as a safety net. These settings can be changed later."
+                        "The device will push state to this integration automatically "
+                        "and initial state is set progressively on connect.\n\n"
+                        "The polling mode controls what states, if any, are collected "
+                        "by polling. Polling is only provided as a fail-safe, it should "
+                        "not be necessary and may be removed in the future.\n\n"
+                        "Using the 'All' mode is the legacy behavior and you probably "
+                        "should never use it."
                     )}}},
                 },
                 {
@@ -90,15 +93,15 @@ class ArcamSetupFlow(BaseSetupFlow[ArcamConfig]):
                         "items": [
                             {
                                 "id": "essential",
-                                "label": {"en": "Essential - periodic check of key states (recommended)"},
+                                "label": {"en": "Essential (recommended)"},
                             },
                             {
                                 "id": "off",
-                                "label": {"en": "None - rely on push events only after initial sync"},
+                                "label": {"en": "None"},
                             },
                             {
                                 "id": "all",
-                                "label": {"en": "All - periodic full state resync"},
+                                "label": {"en": "All"},
                             },
                         ],
                     }},
