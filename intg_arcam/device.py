@@ -195,6 +195,11 @@ class ArcamDevice(ExternalClientDevice):
 
     _TUNER_SOURCES = {"FM", "DAB"}
 
+    _TUNER_COMMANDS = [
+        CommandCodes.DAB_STATION, CommandCodes.DLS_PDT_INFO,
+        CommandCodes.RDS_INFORMATION, CommandCodes.TUNER_PRESET,
+    ]
+
     def _mark_all_stale(self) -> None:
         """Mark all tracked command codes as stale."""
         self._stale = set(self._ALL_TRACKED_COMMANDS)
@@ -235,7 +240,7 @@ class ArcamDevice(ExternalClientDevice):
 
         await self._initialize_state()
 
-        # Start trickle background task for Groups 2/3/4
+        # Start trickle background task for Groups 2/3
         self._trickle_task = asyncio.create_task(self._trickle_remaining_state())
 
         if self._polling_mode != PollingMode.OFF:
@@ -438,15 +443,15 @@ class ArcamDevice(ExternalClientDevice):
 
                 if data.device_model in APIVERSION_450_SERIES:
                     self._arcam_state._api_model = ApiModel.API450_SERIES
-                if data.device_model in APIVERSION_860_SERIES:
+                elif data.device_model in APIVERSION_860_SERIES:
                     self._arcam_state._api_model = ApiModel.API860_SERIES
-                if data.device_model in APIVERSION_HDA_SERIES:
+                elif data.device_model in APIVERSION_HDA_SERIES:
                     self._arcam_state._api_model = ApiModel.APIHDA_SERIES
-                if data.device_model in APIVERSION_SA_SERIES:
+                elif data.device_model in APIVERSION_SA_SERIES:
                     self._arcam_state._api_model = ApiModel.APISA_SERIES
-                if data.device_model in APIVERSION_PA_SERIES:
+                elif data.device_model in APIVERSION_PA_SERIES:
                     self._arcam_state._api_model = ApiModel.APIPA_SERIES
-                if data.device_model in APIVERSION_ST_SERIES:
+                elif data.device_model in APIVERSION_ST_SERIES:
                     self._arcam_state._api_model = ApiModel.APIST_SERIES
 
                 _LOG.info("%s Detected model: %s (API: %s)",
@@ -469,7 +474,7 @@ class ArcamDevice(ExternalClientDevice):
         _LOG.info("%s Immediate state sync complete", self.log_id)
 
     async def _trickle_remaining_state(self) -> None:
-        """Background task: Groups 2 (trickle), 3 (tuner), 4 (presets).
+        """Background task: Groups 2 (trickle) and 3 (tuner).
 
         Queries remaining state with staleness checks — push events that
         arrive during trickle automatically skip redundant queries.
@@ -503,12 +508,7 @@ class ArcamDevice(ExternalClientDevice):
             # Group 3 — Tuner (conditional)
             if self._source in self._TUNER_SOURCES:
                 _LOG.debug("%s Group 3: Trickling tuner state", self.log_id)
-                for cc in [
-                    CommandCodes.DAB_STATION,
-                    CommandCodes.DLS_PDT_INFO,
-                    CommandCodes.RDS_INFORMATION,
-                    CommandCodes.TUNER_PRESET,
-                ]:
+                for cc in self._TUNER_COMMANDS:
                     if self._source not in self._TUNER_SOURCES:
                         _LOG.debug("%s Group 3: Source changed away from tuner, aborting", self.log_id)
                         break
@@ -530,10 +530,7 @@ class ArcamDevice(ExternalClientDevice):
         """Background task: query Group 3 tuner state only."""
         try:
             _LOG.debug("%s Trickling tuner state (runtime trigger)", self.log_id)
-            for cc in [
-                CommandCodes.DAB_STATION, CommandCodes.DLS_PDT_INFO,
-                CommandCodes.RDS_INFORMATION, CommandCodes.TUNER_PRESET,
-            ]:
+            for cc in self._TUNER_COMMANDS:
                 if self._source not in self._TUNER_SOURCES:
                     _LOG.debug("%s Source changed away from tuner, aborting", self.log_id)
                     break
@@ -568,33 +565,29 @@ class ArcamDevice(ExternalClientDevice):
 
             source = self._arcam_state.get_source()
             if source is not None:
-                self._source = source.name if hasattr(source, "name") else str(source)
+                self._source = source.name
             else:
                 self._source = None
 
             source_list = self._arcam_state.get_source_list()
             if source_list:
-                self._source_list = [src.name if hasattr(src, "name") else str(src) for src in source_list]
+                self._source_list = [src.name for src in source_list]
             else:
                 self._source_list = []
 
-            if hasattr(self._arcam_state, "get_decode_mode"):
-                decode_mode = self._arcam_state.get_decode_mode()
-                if decode_mode is not None:
-                    self._sound_mode = decode_mode.name if hasattr(decode_mode, "name") else str(decode_mode)
+            decode_mode = self._arcam_state.get_decode_mode()
+            if decode_mode is not None:
+                self._sound_mode = decode_mode.name
 
-            if hasattr(self._arcam_state, "get_decode_modes"):
-                decode_modes = self._arcam_state.get_decode_modes()
-                if decode_modes:
-                    self._sound_mode_list = [m.name if hasattr(m, "name") else str(m) for m in decode_modes]
+            decode_modes = self._arcam_state.get_decode_modes()
+            if decode_modes:
+                self._sound_mode_list = [m.name for m in decode_modes]
 
-            if hasattr(self._arcam_state, "get_incoming_audio_format"):
-                audio_fmt = self._arcam_state.get_incoming_audio_format()
-                if audio_fmt and isinstance(audio_fmt, tuple) and len(audio_fmt) >= 2:
-                    fmt, config = audio_fmt
-                    if fmt is not None:
-                        fmt_name = fmt.name if hasattr(fmt, "name") else str(fmt)
-                        self._audio_format = fmt_name
+            audio_fmt = self._arcam_state.get_incoming_audio_format()
+            if audio_fmt and isinstance(audio_fmt, tuple) and len(audio_fmt) >= 2:
+                fmt, config = audio_fmt
+                if fmt is not None:
+                    self._audio_format = fmt.name
 
             room_eq_data = self._arcam_state._state.get(CommandCodes.ROOM_EQUALIZATION)
             if room_eq_data is not None:
@@ -608,8 +601,8 @@ class ArcamDevice(ExternalClientDevice):
             self._emit_update()
 
         except Exception as err:
-            _LOG.warning("%s Failed to initialize state: %s (%s)",
-                        self.log_id, err, type(err).__name__)
+            _LOG.error("%s Failed to initialize state: %s (%s)",
+                      self.log_id, err, type(err).__name__)
 
     async def _handle_state_update(self) -> None:
         """Handle state update from Arcam client."""
@@ -628,72 +621,60 @@ class ArcamDevice(ExternalClientDevice):
             # ON→OFF→ON bounce during device power transitions.
             command_suppression = time.monotonic() - self._last_command_time < 3.0
 
-            if hasattr(self._arcam_state, "get_power"):
-                power = self._arcam_state.get_power()
-                if power is not None and power != self._power and not command_suppression:
-                    self._power = power
+            power = self._arcam_state.get_power()
+            if power is not None and power != self._power and not command_suppression:
+                self._power = power
+                changed = True
+
+            raw_volume = self._arcam_state.get_volume()
+            if raw_volume is not None:
+                volume = self._arcam_vol_to_percent(raw_volume)
+                if volume != self._volume:
+                    self._volume = volume
                     changed = True
 
-            if hasattr(self._arcam_state, "get_volume"):
-                raw_volume = self._arcam_state.get_volume()
-                if raw_volume is not None:
-                    volume = self._arcam_vol_to_percent(raw_volume)
-                    if volume != self._volume:
-                        self._volume = volume
+            muted = self._arcam_state.get_mute()
+            if muted is not None and muted != self._muted:
+                self._muted = muted
+                changed = True
+
+            source = self._arcam_state.get_source()
+            source_name = source.name if source else None
+            if source_name is not None and source_name != self._source:
+                old_source = self._source
+                self._source = source_name
+                changed = True
+                # Trigger Group 3 trickle if switched to tuner and trickle is not running
+                if (source_name in self._TUNER_SOURCES
+                        and (old_source is None or old_source not in self._TUNER_SOURCES)
+                        and (self._trickle_task is None or self._trickle_task.done())):
+                    tuner_stale = any(cc in self._stale for cc in self._TUNER_COMMANDS)
+                    if tuner_stale:
+                        _LOG.debug("%s Source changed to tuner, triggering Group 3 trickle",
+                                  self.log_id)
+                        self._trickle_task = asyncio.create_task(
+                            self._trickle_tuner_state()
+                        )
+
+            decode_mode = self._arcam_state.get_decode_mode()
+            if decode_mode is not None:
+                if decode_mode.name != self._sound_mode:
+                    self._sound_mode = decode_mode.name
+                    changed = True
+
+            decode_modes = self._arcam_state.get_decode_modes()
+            if decode_modes:
+                modes = [m.name for m in decode_modes]
+                if modes != self._sound_mode_list:
+                    self._sound_mode_list = modes
+
+            audio_fmt = self._arcam_state.get_incoming_audio_format()
+            if audio_fmt and isinstance(audio_fmt, tuple) and len(audio_fmt) >= 2:
+                fmt, config = audio_fmt
+                if fmt is not None:
+                    if fmt.name != self._audio_format:
+                        self._audio_format = fmt.name
                         changed = True
-
-            if hasattr(self._arcam_state, "get_mute"):
-                muted = self._arcam_state.get_mute()
-                if muted is not None and muted != self._muted:
-                    self._muted = muted
-                    changed = True
-
-            if hasattr(self._arcam_state, "get_source"):
-                source = self._arcam_state.get_source()
-                source_name = source.name if hasattr(source, "name") else str(source) if source else None
-                if source_name is not None and source_name != self._source:
-                    old_source = self._source
-                    self._source = source_name
-                    changed = True
-                    # Trigger Group 3 trickle if switched to tuner and trickle is not running
-                    if (source_name in self._TUNER_SOURCES
-                            and (old_source is None or old_source not in self._TUNER_SOURCES)
-                            and (self._trickle_task is None or self._trickle_task.done())):
-                        tuner_stale = any(cc in self._stale for cc in [
-                            CommandCodes.DAB_STATION, CommandCodes.DLS_PDT_INFO,
-                            CommandCodes.RDS_INFORMATION, CommandCodes.TUNER_PRESET,
-                        ])
-                        if tuner_stale:
-                            _LOG.debug("%s Source changed to tuner, triggering Group 3 trickle",
-                                      self.log_id)
-                            self._trickle_task = asyncio.create_task(
-                                self._trickle_tuner_state()
-                            )
-
-            if hasattr(self._arcam_state, "get_decode_mode"):
-                decode_mode = self._arcam_state.get_decode_mode()
-                if decode_mode is not None:
-                    mode_name = decode_mode.name if hasattr(decode_mode, "name") else str(decode_mode)
-                    if mode_name != self._sound_mode:
-                        self._sound_mode = mode_name
-                        changed = True
-
-            if hasattr(self._arcam_state, "get_decode_modes"):
-                decode_modes = self._arcam_state.get_decode_modes()
-                if decode_modes:
-                    modes = [m.name if hasattr(m, "name") else str(m) for m in decode_modes]
-                    if modes != self._sound_mode_list:
-                        self._sound_mode_list = modes
-
-            if hasattr(self._arcam_state, "get_incoming_audio_format"):
-                audio_fmt = self._arcam_state.get_incoming_audio_format()
-                if audio_fmt and isinstance(audio_fmt, tuple) and len(audio_fmt) >= 2:
-                    fmt, config = audio_fmt
-                    if fmt is not None:
-                        fmt_name = fmt.name if hasattr(fmt, "name") else str(fmt)
-                        if fmt_name != self._audio_format:
-                            self._audio_format = fmt_name
-                            changed = True
 
             room_eq_data = self._arcam_state._state.get(CommandCodes.ROOM_EQUALIZATION)
             if room_eq_data is not None:
@@ -710,7 +691,7 @@ class ArcamDevice(ExternalClientDevice):
                 self._emit_update()
 
         except Exception as err:
-            _LOG.debug("%s Error handling state update: %s", self.log_id, err)
+            _LOG.error("%s Error handling state update: %s", self.log_id, err)
 
     def _emit_update(self):
         """Emit device state update for all entities."""
@@ -752,7 +733,7 @@ class ArcamDevice(ExternalClientDevice):
 
         sound_mode_select_id = f"select.{self.identifier}.sound_mode"
         sound_mode_select_data = {
-            SelectAttributes.STATE: SelectStates.ON.value,
+            SelectAttributes.STATE: SelectStates.ON.value if self._power else SelectStates.UNAVAILABLE.value,
             SelectAttributes.CURRENT_OPTION: self._sound_mode if self._sound_mode else "",
             SelectAttributes.OPTIONS: self._sound_mode_list,
         }
