@@ -19,6 +19,8 @@ from arcam.fmj import (
     APIVERSION_HDA_SERIES, APIVERSION_SA_SERIES,
     APIVERSION_PA_SERIES, APIVERSION_ST_SERIES,
 )
+from arcam.fmj.client import Client
+from arcam.fmj.state import State
 from ucapi_framework import ExternalClientDevice, DeviceEvents
 from intg_arcam.config import ArcamConfig, PollingMode
 
@@ -210,9 +212,6 @@ class ArcamDevice(ExternalClientDevice):
 
     async def create_client(self) -> Any:
         """Create the Arcam client (required by ExternalClientDevice)."""
-        from arcam.fmj.client import Client
-        from arcam.fmj.state import State
-
         self._client = Client(self._device_config.host, self._device_config.port)
         self._arcam_state = State(self._client, self._device_config.zone)
         return self._client
@@ -251,13 +250,19 @@ class ArcamDevice(ExternalClientDevice):
         if self._polling_mode != PollingMode.OFF:
             self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
 
-    async def disconnect_client(self) -> None:
-        """Disconnect the Arcam client (required by ExternalClientDevice)."""
-        await self._cancel_poweroff_reconnect()
+    async def disconnect_client(self, *, full_reset: bool = True) -> None:
+        """Disconnect the Arcam client (required by ExternalClientDevice).
 
-        self._initial_sync_complete = False
-        self._model_detected = False
-        self._mark_all_stale()
+        Args:
+            full_reset: When True (default), cancels power-off reconnect and
+                resets model detection and sync state. When False, preserves
+                cached model info for use during power-off reconnect.
+        """
+        if full_reset:
+            await self._cancel_poweroff_reconnect()
+            self._initial_sync_complete = False
+            self._model_detected = False
+            self._mark_all_stale()
 
         for task in self._debounce_tasks.values():
             if not task.done():
@@ -295,7 +300,8 @@ class ArcamDevice(ExternalClientDevice):
                 pass
 
         if self._client:
-            _LOG.info("%s Closing client connection", self.log_id)
+            if full_reset:
+                _LOG.info("%s Closing client connection", self.log_id)
             try:
                 await self._client.stop()
             except Exception as err:
@@ -874,56 +880,6 @@ class ArcamDevice(ExternalClientDevice):
             self._room_eq_names = names
             _LOG.info("%s Room EQ names: %s", self.log_id, names)
 
-    async def _cleanup_client_resources(self) -> None:
-        """Clean up client resources without resetting model cache or emitting events.
-
-        Like disconnect_client() but preserves _model_detected, _cached_api_model,
-        and _cached_amxduet for use during power-off reconnect.
-        """
-        for task in self._debounce_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._debounce_tasks.clear()
-
-        if self._trickle_task and not self._trickle_task.done():
-            self._trickle_task.cancel()
-            try:
-                await self._trickle_task
-            except asyncio.CancelledError:
-                pass
-            self._trickle_task = None
-
-        if self._maintain_task and not self._maintain_task.done():
-            self._maintain_task.cancel()
-            try:
-                await self._maintain_task
-            except asyncio.CancelledError:
-                pass
-            self._maintain_task = None
-
-        if self._process_task and not self._process_task.done():
-            self._process_task.cancel()
-            try:
-                await self._process_task
-            except asyncio.CancelledError:
-                pass
-            self._process_task = None
-
-        if self._arcam_state:
-            try:
-                await self._arcam_state.stop()
-            except Exception:
-                pass
-
-        if self._client:
-            try:
-                await self._client.stop()
-            except Exception:
-                pass
-            finally:
-                self._client = None
-                self._arcam_state = None
-
     async def _cancel_poweroff_reconnect(self) -> None:
         """Cancel any in-progress power-off reconnect."""
         self._poweroff_reconnecting = False
@@ -964,7 +920,7 @@ class ArcamDevice(ExternalClientDevice):
                          self.log_id, attempt, wait)
 
                 # Clean up old client resources (preserves model cache)
-                await self._cleanup_client_resources()
+                await self.disconnect_client(full_reset=False)
                 await asyncio.sleep(wait)
 
                 if not self._poweroff_reconnecting:
@@ -972,9 +928,6 @@ class ArcamDevice(ExternalClientDevice):
 
                 # Create fresh client + state with cached model
                 try:
-                    from arcam.fmj.client import Client
-                    from arcam.fmj.state import State
-
                     self._client = Client(self._device_config.host, self._device_config.port)
                     self._arcam_state = State(self._client, self._device_config.zone)
 
@@ -1074,7 +1027,7 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.info("%s Turn on during power-off reconnect: "
                      "cancelling reconnect, doing full connect", self.log_id)
             await self._cancel_poweroff_reconnect()
-            await self._cleanup_client_resources()
+            await self.disconnect_client(full_reset=False)
             self._model_detected = False  # Full Group 0 since receiver is powering on
 
             try:
