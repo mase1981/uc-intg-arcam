@@ -67,8 +67,8 @@ RC5_COMMANDS = {
     "INPUT_BT": (0x10, 0x7A),
     "INPUT_GAME": (0x10, 0x61),
     "STEREO": (0x10, 0x6B),
-    "DOLBY_PLII_MOVIE": (0x10, 0x6E),
-    "DOLBY_PLII_MUSIC": (0x10, 0x6E),
+    "DOLBY_PLII_MOVIE": (0x10, 0x67),
+    "DOLBY_PLII_MUSIC": (0x10, 0x68),
     "DTS_NEO6_CINEMA": (0x10, 0x6F),
     "DTS_NEO6_MUSIC": (0x10, 0x70),
 }
@@ -1173,11 +1173,11 @@ class ArcamDevice(ExternalClientDevice):
 
     def _arcam_vol_to_percent(self, arcam_vol: int) -> int:
         """Convert Arcam volume (0-99) to percentage (0-100)."""
-        return min(100, max(0, arcam_vol))
+        return min(100, max(0, round(arcam_vol * 100 / 99)))
 
     def _percent_to_arcam_vol(self, percent: int) -> int:
         """Convert percentage (0-100) to Arcam volume (0-99)."""
-        return min(99, max(0, percent))
+        return min(99, max(0, round(percent * 99 / 100)))
 
     @_tracks_interaction
     async def send_rc5_command(self, command: str) -> bool:
