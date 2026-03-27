@@ -6,7 +6,14 @@ Arcam FMJ configuration for Unfolded Circle integration.
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
 from ucapi_framework import BaseConfigManager
+
+
+class PollingMode(StrEnum):
+    OFF = "off"
+    ESSENTIAL = "essential"
+    ALL = "all"
 
 
 @dataclass
@@ -17,6 +24,8 @@ class ArcamConfig:
     host: str
     port: int = 50000
     zone: int = 1
+    polling_mode: str = "essential"
+    poll_interval: int = 60
 
 
 class ArcamConfigManager(BaseConfigManager[ArcamConfig]):

@@ -39,7 +39,7 @@ class ArcamMediaPlayer(MediaPlayer):
         ]
 
         attributes = {
-            Attributes.STATE: States.UNAVAILABLE,
+            Attributes.STATE: States.UNKNOWN,
             Attributes.VOLUME: 0,
             Attributes.MUTED: False,
             Attributes.SOURCE: "",

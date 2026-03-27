@@ -11,7 +11,7 @@ from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
 from intg_arcam.media_player import ArcamMediaPlayer
 from intg_arcam.remote import ArcamRemote
-from intg_arcam.sensor import ArcamAudioFormatSensor, ArcamSoundModeSensor
+from intg_arcam.sensor import ArcamAudioFormatSensor, ArcamSoundModeSensor, ArcamRoomEqSensor
 from intg_arcam.select import ArcamSoundModeSelect
 
 _LOG = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ class ArcamDriver(BaseIntegrationDriver[ArcamDevice, ArcamConfig]):
                 lambda cfg, dev: [
                     ArcamAudioFormatSensor(cfg, dev),
                     ArcamSoundModeSensor(cfg, dev),
+                    ArcamRoomEqSensor(cfg, dev),
                 ],
                 ArcamSoundModeSelect,
             ],
@@ -44,8 +45,18 @@ class ArcamDriver(BaseIntegrationDriver[ArcamDevice, ArcamConfig]):
         The Remote's subscription flow doesn't trigger for this integration,
         so we bypass it by adding entities directly to configured_entities.
         This ensures entities appear and work immediately after setup.
+
+        Skips re-registration on reconnect to avoid resetting entity states
+        to their initial values (e.g., UNKNOWN) which the framework would
+        emit as entity_change events before our state sync completes.
         """
         device_id = self.get_device_id(device_config)
+
+        # Check if entities are already registered (reconnect scenario)
+        if self.api.configured_entities.contains(f"media_player.{device_id}"):
+            _LOG.debug("Entities already registered for %s, skipping", device_id)
+            return
+
         _LOG.info("Registering available entities for %s", device_id)
 
         entities = self.create_entities(device_config, device)

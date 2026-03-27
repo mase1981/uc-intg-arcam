@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from ucapi import StatusCodes
-from ucapi.remote import Commands, Features, Remote
+from ucapi.remote import Attributes, Commands, Features, Remote, States
 
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice, RC5_COMMANDS
@@ -27,8 +27,10 @@ class ArcamRemote(Remote):
         entity_id = f"remote.{device_config.identifier}"
         entity_name = f"{device_config.name} Remote"
 
-        features = [Features.SEND_CMD]
-        attributes = {}
+        features = [Features.ON_OFF, Features.SEND_CMD]
+        attributes = {
+            Attributes.STATE: States.UNKNOWN,
+        }
 
         simple_commands = [
             "CURSOR_UP",
@@ -57,6 +59,8 @@ class ArcamRemote(Remote):
             "INPUT_NET",
             "INPUT_USB",
             "INPUT_STB",
+            "INPUT_UHD",
+            "INPUT_BT",
             "INPUT_GAME",
             "STEREO",
             "DOLBY_PLII_MOVIE",
@@ -278,6 +282,12 @@ class ArcamRemote(Remote):
                         },
                         {
                             "type": "text",
+                            "text": "UHD",
+                            "command": {"cmd_id": "INPUT_UHD"},
+                            "location": {"x": 3, "y": 2},
+                        },
+                        {
+                            "type": "text",
                             "text": "FM",
                             "command": {"cmd_id": "INPUT_FM"},
                             "location": {"x": 0, "y": 3},
@@ -287,6 +297,12 @@ class ArcamRemote(Remote):
                             "text": "DAB",
                             "command": {"cmd_id": "INPUT_DAB"},
                             "location": {"x": 1, "y": 3},
+                        },
+                        {
+                            "type": "text",
+                            "text": "BT",
+                            "command": {"cmd_id": "INPUT_BT"},
+                            "location": {"x": 2, "y": 3},
                         },
                     ],
                 },
@@ -357,6 +373,14 @@ class ArcamRemote(Remote):
         _LOG.info("[%s] Command: %s %s", self.id, cmd_id, params or "")
 
         try:
+            if cmd_id == Commands.ON:
+                success = await self._device.turn_on()
+                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+
+            if cmd_id == Commands.OFF:
+                success = await self._device.turn_off()
+                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+
             if cmd_id != Commands.SEND_CMD:
                 _LOG.warning("[%s] Unsupported command type: %s", self.id, cmd_id)
                 return StatusCodes.NOT_FOUND
