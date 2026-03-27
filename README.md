@@ -82,9 +82,14 @@ Your support helps maintain this integration. Thank you! ❤️
 
 #### **Arcam FMJ A/V Receivers**
 - **AVR Series** - AVR390, AVR450, AVR550, AVR750, AVR850, AVR860
+- **HDA Series** - AVR5, AVR10, AVR20, AVR30, AVR11, AVR21, AVR31
 - **AV Series** - AV40, AV41
 - **SA Series** - SA10, SA20, SA30
 - **All FMJ Models** - Any Arcam FMJ device with network control
+
+#### **JBL Synthesis**
+- **SDP Series** - SDP-55, SDP-58
+- These models use the same Arcam network protocol and are fully compatible
 
 #### **Zone Support**
 - **Zone 1** - Primary zone with full control
