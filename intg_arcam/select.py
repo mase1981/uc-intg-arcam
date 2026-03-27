@@ -9,7 +9,8 @@ import logging
 from typing import Any
 
 from ucapi import StatusCodes
-from ucapi.select import Attributes, Select, States
+from ucapi.select import Attributes, Commands, States
+from ucapi_framework import SelectEntity
 
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
@@ -17,7 +18,7 @@ from intg_arcam.device import ArcamDevice
 _LOG = logging.getLogger(__name__)
 
 
-class ArcamSoundModeSelect(Select):
+class ArcamSoundModeSelect(SelectEntity):
     """Select entity for sound/decode mode selection."""
 
     def __init__(self, device_config: ArcamConfig, device: ArcamDevice):
@@ -39,16 +40,24 @@ class ArcamSoundModeSelect(Select):
             attributes,
             cmd_handler=self.handle_command,
         )
+        self.subscribe_to_device(device)
 
         _LOG.info("[%s] Sound mode select entity initialized", self.id)
 
+    async def sync_state(self):
+        self.update({
+            Attributes.STATE: States.ON if self._device.power else States.UNAVAILABLE,
+            Attributes.CURRENT_OPTION: self._device.sound_mode or "",
+            Attributes.OPTIONS: self._device.sound_mode_list,
+        })
+
     async def handle_command(
-        self, entity: Select, cmd_id: str, params: dict[str, Any] | None
+        self, entity: SelectEntity, cmd_id: str, params: dict[str, Any] | None
     ) -> StatusCodes:
         _LOG.info("[%s] Command: %s %s", self.id, cmd_id, params or "")
 
         try:
-            if cmd_id == "select_option" and params and "option" in params:
+            if cmd_id == Commands.SELECT_OPTION and params and "option" in params:
                 mode_name = params["option"]
                 success = await self._device.set_decode_mode(mode_name)
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR

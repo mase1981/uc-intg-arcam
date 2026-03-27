@@ -19,10 +19,6 @@ from arcam.fmj import (
     APIVERSION_HDA_SERIES, APIVERSION_SA_SERIES,
     APIVERSION_PA_SERIES, APIVERSION_ST_SERIES,
 )
-from ucapi.media_player import Attributes as MediaAttributes, States as MediaStates
-from ucapi.remote import Attributes as RemoteAttributes, States as RemoteStates
-from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
-from ucapi.select import Attributes as SelectAttributes, States as SelectStates
 from ucapi_framework import ExternalClientDevice, DeviceEvents
 from intg_arcam.config import ArcamConfig, PollingMode
 
@@ -811,56 +807,9 @@ class ArcamDevice(ExternalClientDevice):
             _LOG.error("%s Error handling state update: %s", self.log_id, err)
 
     def _emit_update(self):
-        """Emit device state update for all entities."""
+        """Emit device state update for all subscribed entities."""
         self._state = "ON" if self._power else "OFF"
-
-        media_player_id = f"media_player.{self.identifier}"
-        media_player_data = {
-            MediaAttributes.STATE: MediaStates.ON if self._power else MediaStates.OFF,
-            MediaAttributes.VOLUME: self._volume,
-            MediaAttributes.MUTED: self._muted,
-            MediaAttributes.SOURCE: self._source if self._source else "",
-            MediaAttributes.SOURCE_LIST: self._source_list,
-        }
-        _LOG.debug("%s Emitting media player update: state=%s vol=%d muted=%s src=%s",
-                  self.log_id, "ON" if self._power else "OFF",
-                  self._volume, self._muted, self._source)
-        self.events.emit(DeviceEvents.UPDATE, media_player_id, media_player_data)
-
-        audio_format_id = f"sensor.{self.identifier}.audio_format"
-        audio_format_data = {
-            SensorAttributes.STATE: SensorStates.ON.value if self._audio_format else SensorStates.UNKNOWN.value,
-            SensorAttributes.VALUE: self._audio_format if self._audio_format else "",
-        }
-        self.events.emit(DeviceEvents.UPDATE, audio_format_id, audio_format_data)
-
-        room_eq_id = f"sensor.{self.identifier}.room_eq"
-        room_eq_data = {
-            SensorAttributes.STATE: SensorStates.ON.value if self._room_eq else SensorStates.UNKNOWN.value,
-            SensorAttributes.VALUE: self._room_eq if self._room_eq else "",
-        }
-        self.events.emit(DeviceEvents.UPDATE, room_eq_id, room_eq_data)
-
-        sound_mode_sensor_id = f"sensor.{self.identifier}.sound_mode"
-        sound_mode_sensor_data = {
-            SensorAttributes.STATE: SensorStates.ON.value if self._sound_mode else SensorStates.UNKNOWN.value,
-            SensorAttributes.VALUE: self._sound_mode if self._sound_mode else "",
-        }
-        self.events.emit(DeviceEvents.UPDATE, sound_mode_sensor_id, sound_mode_sensor_data)
-
-        sound_mode_select_id = f"select.{self.identifier}.sound_mode"
-        sound_mode_select_data = {
-            SelectAttributes.STATE: SelectStates.ON.value if self._power else SelectStates.UNAVAILABLE.value,
-            SelectAttributes.CURRENT_OPTION: self._sound_mode if self._sound_mode else "",
-            SelectAttributes.OPTIONS: self._sound_mode_list,
-        }
-        self.events.emit(DeviceEvents.UPDATE, sound_mode_select_id, sound_mode_select_data)
-
-        remote_id = f"remote.{self.identifier}"
-        remote_data = {
-            RemoteAttributes.STATE: (RemoteStates.ON if self._power else RemoteStates.OFF).value,
-        }
-        self.events.emit(DeviceEvents.UPDATE, remote_id, remote_data)
+        self.push_update()
 
     def _format_room_eq(self, index: int) -> str | None:
         """Format room EQ index as a display string, using name if available.

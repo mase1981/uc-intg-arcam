@@ -1,15 +1,18 @@
 [project]
 name = "uc-intg-arcam"
-dynamic = ["version"]
+version = "2.0.0"
 description = "Arcam FMJ integration for Unfolded Circle Remote"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "ucapi-framework>=1.8.4",
+    "ucapi-framework>=1.9.1",
     "ucapi>=0.5.2",
     "arcam-fmj==1.8.2",
     "defusedxml>=0.7.1",
 ]
+
+[tool.setuptools.packages.find]
+include = ["intg_arcam*"]
 
 [dependency-groups]
 dev = [
@@ -30,5 +33,3 @@ ignore = []
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
-[tool.setuptools.dynamic]
-version = {attr = "intg_arcam.__version__"}

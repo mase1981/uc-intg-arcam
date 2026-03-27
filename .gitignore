@@ -14,8 +14,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
+# Allow lib/*.whl for ucapi dev wheels
+!lib/
+lib/*
+!lib/*.whl
 parts/
 sdist/
 var/

@@ -9,7 +9,8 @@ import logging
 from typing import Any
 
 from ucapi import StatusCodes
-from ucapi.remote import Attributes, Commands, Features, Remote, States
+from ucapi.remote import Attributes, Commands, Features, States
+from ucapi_framework import RemoteEntity
 
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice, RC5_COMMANDS
@@ -17,7 +18,7 @@ from intg_arcam.device import ArcamDevice, RC5_COMMANDS
 _LOG = logging.getLogger(__name__)
 
 
-class ArcamRemote(Remote):
+class ArcamRemote(RemoteEntity):
     """Remote entity for Arcam FMJ advanced control."""
 
     def __init__(self, device_config: ArcamConfig, device: ArcamDevice):
@@ -364,11 +365,17 @@ class ArcamRemote(Remote):
             ui_pages=user_interface["pages"],
             cmd_handler=self.handle_command,
         )
+        self.subscribe_to_device(device)
 
         _LOG.info("[%s] Remote entity initialized with %d commands", entity_id, len(simple_commands))
 
+    async def sync_state(self):
+        self.update({
+            Attributes.STATE: States.ON if self._device.power else States.OFF,
+        })
+
     async def handle_command(
-        self, entity: Remote, cmd_id: str, params: dict[str, Any] | None
+        self, entity: RemoteEntity, cmd_id: str, params: dict[str, Any] | None
     ) -> StatusCodes:
         _LOG.info("[%s] Command: %s %s", self.id, cmd_id, params or "")
 

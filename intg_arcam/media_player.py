@@ -9,16 +9,16 @@ import logging
 from typing import Any
 from ucapi import StatusCodes
 from ucapi.media_player import (
-    Attributes, Commands, DeviceClasses, Features,
-    MediaPlayer, States,
+    Attributes, Commands, DeviceClasses, Features, States,
 )
+from ucapi_framework import MediaPlayerEntity
 from intg_arcam.config import ArcamConfig
 from intg_arcam.device import ArcamDevice
 
 _LOG = logging.getLogger(__name__)
 
 
-class ArcamMediaPlayer(MediaPlayer):
+class ArcamMediaPlayer(MediaPlayerEntity):
     """Media player entity for Arcam FMJ."""
 
     def __init__(self, device_config: ArcamConfig, device: ArcamDevice):
@@ -59,9 +59,19 @@ class ArcamMediaPlayer(MediaPlayer):
             options=options,
             cmd_handler=self.handle_command,
         )
+        self.subscribe_to_device(device)
+
+    async def sync_state(self):
+        self.update({
+            Attributes.STATE: States.ON if self._device.power else States.OFF,
+            Attributes.VOLUME: self._device.volume,
+            Attributes.MUTED: self._device.muted,
+            Attributes.SOURCE: self._device.source or "",
+            Attributes.SOURCE_LIST: self._device.source_list,
+        })
 
     async def handle_command(
-        self, entity: MediaPlayer, cmd_id: str, params: dict[str, Any] | None
+        self, entity: MediaPlayerEntity, cmd_id: str, params: dict[str, Any] | None
     ) -> StatusCodes:
         """Handle commands."""
         _LOG.info("[%s] Command: %s %s", self.id, cmd_id, params or "")

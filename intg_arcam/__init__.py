@@ -70,8 +70,7 @@ async def main():
     # arcam.fmj pinned to INFO: only 4 statements (connect/disconnect lifecycle),
     # avoids per-packet DEBUG noise while retaining useful operational events.
     logging.getLogger("arcam.fmj").setLevel(logging.INFO)
-    # ucapi and ucapi_framework are left at root default (WARNING).
-    # Official UC integrations don't override these.
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
     _LOG.info("Starting Arcam FMJ Integration v%s", __version__)
 
@@ -94,7 +93,7 @@ async def main():
         driver_json_path = os.path.join(os.path.dirname(__file__), "..", "driver.json")
         await driver.api.init(os.path.abspath(driver_json_path), setup_handler)
 
-        await driver.register_all_configured_devices(connect=False)
+        await driver.register_all_device_instances(connect=False)
 
         device_count = len(list(config_manager.all()))
         if device_count > 0:
