@@ -92,6 +92,7 @@ artifacts/
 # AI Tools
 Claude/
 .claude/
+.worktrees/
 tmpclaude-*/
 
 # Testing files (keep local only, never push to repository)
