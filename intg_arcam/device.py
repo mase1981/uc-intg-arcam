@@ -19,6 +19,8 @@ from arcam.fmj import (
     APIVERSION_HDA_SERIES, APIVERSION_SA_SERIES,
     APIVERSION_PA_SERIES, APIVERSION_ST_SERIES,
 )
+from arcam.fmj.client import Client
+from arcam.fmj.state import State
 from ucapi_framework import ExternalClientDevice, DeviceEvents
 from intg_arcam.config import ArcamConfig, PollingMode
 
@@ -105,6 +107,13 @@ class ArcamDevice(ExternalClientDevice):
         self._initial_sync_complete: bool = False
         self._model_detected: bool = False
         self._trickle_task: asyncio.Task | None = None
+
+        # Power-off reconnect state
+        self._poweroff_reconnecting: bool = False
+        self._poweroff_reconnect_task: asyncio.Task | None = None
+        self._poweroff_reconnect_deadline: float = 0.0
+        self._cached_api_model: ApiModel | None = None
+        self._cached_amxduet = None
 
         # Staleness tracking — all command codes start stale
         self._stale: set[CommandCodes] = set()
@@ -203,9 +212,6 @@ class ArcamDevice(ExternalClientDevice):
 
     async def create_client(self) -> Any:
         """Create the Arcam client (required by ExternalClientDevice)."""
-        from arcam.fmj.client import Client
-        from arcam.fmj.state import State
-
         self._client = Client(self._device_config.host, self._device_config.port)
         self._arcam_state = State(self._client, self._device_config.zone)
         return self._client
@@ -244,11 +250,19 @@ class ArcamDevice(ExternalClientDevice):
         if self._polling_mode != PollingMode.OFF:
             self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
 
-    async def disconnect_client(self) -> None:
-        """Disconnect the Arcam client (required by ExternalClientDevice)."""
-        self._initial_sync_complete = False
-        self._model_detected = False
-        self._mark_all_stale()
+    async def disconnect_client(self, *, full_reset: bool = True) -> None:
+        """Disconnect the Arcam client (required by ExternalClientDevice).
+
+        Args:
+            full_reset: When True (default), cancels power-off reconnect and
+                resets model detection and sync state. When False, preserves
+                cached model info for use during power-off reconnect.
+        """
+        if full_reset:
+            await self._cancel_poweroff_reconnect()
+            self._initial_sync_complete = False
+            self._model_detected = False
+            self._mark_all_stale()
 
         for task in self._debounce_tasks.values():
             if not task.done():
@@ -286,7 +300,8 @@ class ArcamDevice(ExternalClientDevice):
                 pass
 
         if self._client:
-            _LOG.info("%s Closing client connection", self.log_id)
+            if full_reset:
+                _LOG.info("%s Closing client connection", self.log_id)
             try:
                 await self._client.stop()
             except Exception as err:
@@ -296,7 +311,13 @@ class ArcamDevice(ExternalClientDevice):
                 self._arcam_state = None
 
     def check_client_connected(self) -> bool:
-        """Check if the Arcam client is connected (required by ExternalClientDevice)."""
+        """Check if the Arcam client is connected (required by ExternalClientDevice).
+
+        Returns True during power-off reconnect to suppress the framework's
+        watchdog from detecting the disconnect and triggering its own cascade.
+        """
+        if self._poweroff_reconnecting:
+            return True
         if not self._client or not self._arcam_state:
             return False
         return self._client.connected
@@ -334,7 +355,18 @@ class ArcamDevice(ExternalClientDevice):
         except Exception as err:
             _LOG.warning("%s Client process loop ended: %s (%s)",
                         self.log_id, err, type(err).__name__)
-            self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
+            if self._poweroff_reconnecting:
+                # Don't emit DISCONNECTED — entities stay OFF, not UNAVAILABLE.
+                # Start our own gentle reconnect instead of the framework's cascade.
+                # Guard: only create the task if one isn't already running (e.g. when
+                # this process loop was a liveness probe inside _reconnect_after_power_off).
+                if not self._poweroff_reconnect_task or self._poweroff_reconnect_task.done():
+                    _LOG.info("%s Power-off reconnect: starting background reconnect",
+                             self.log_id)
+                    self._poweroff_reconnect_task = asyncio.create_task(
+                        self._reconnect_after_power_off())
+            else:
+                self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
 
     async def _maintain_connection_loop(self) -> None:
         """Background task for periodic state refresh, mode-aware."""
@@ -352,11 +384,19 @@ class ArcamDevice(ExternalClientDevice):
                     continue
 
                 if self._polling_mode == PollingMode.ESSENTIAL:
+                    # POWER is not polled — the library heartbeat (5s POWER query)
+                    # already monitors power state reliably.
                     if self._power:
-                        codes = [CommandCodes.POWER, CommandCodes.VOLUME,
+                        codes = [CommandCodes.VOLUME,
                                  CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE]
                     else:
-                        codes = [CommandCodes.POWER]
+                        codes = []
+
+                    if not codes:
+                        # Device is off — just sleep for the poll interval.
+                        # Heartbeat handles power monitoring.
+                        await asyncio.sleep(self._poll_interval)
+                        continue
 
                     stagger_delay = self._poll_interval / len(codes)
                     for cc in codes:
@@ -381,8 +421,9 @@ class ArcamDevice(ExternalClientDevice):
                     if time.monotonic() - self._last_command_time < self._poll_interval * 0.5:
                         _LOG.debug("%s Skipping poll, recent user interaction", self.log_id)
                         continue
-                    # Query Group 1 directly, then mark remaining stale and re-trickle
-                    for cc in [CommandCodes.POWER, CommandCodes.VOLUME,
+                    # Query Group 1 directly (no POWER — heartbeat handles it),
+                    # then mark remaining stale and re-trickle.
+                    for cc in [CommandCodes.VOLUME,
                                CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE]:
                         if not await self._query_command(cc, delay=0.3):
                             break
@@ -839,9 +880,165 @@ class ArcamDevice(ExternalClientDevice):
             self._room_eq_names = names
             _LOG.info("%s Room EQ names: %s", self.log_id, names)
 
+    async def _cancel_poweroff_reconnect(self) -> None:
+        """Cancel any in-progress power-off reconnect."""
+        self._poweroff_reconnecting = False
+        if self._poweroff_reconnect_task and not self._poweroff_reconnect_task.done():
+            self._poweroff_reconnect_task.cancel()
+            try:
+                await self._poweroff_reconnect_task
+            except asyncio.CancelledError:
+                pass
+        self._poweroff_reconnect_task = None
+
+    async def _reconnect_after_power_off(self) -> None:
+        """Background task: gently reconnect after we powered off the receiver.
+
+        The receiver's command processor shuts down while the IP stack stays up.
+        This loop waits for the receiver to become responsive again, using the
+        process loop (heartbeat) as a liveness probe. On success, it restores
+        state with cached model info (skipping Group 0) and re-starts background
+        tasks.
+
+        Gives up after the 2-minute deadline and falls back to the normal
+        DISCONNECTED flow.
+        """
+        attempt = 0
+        try:
+            while self._poweroff_reconnecting:
+                # Check deadline
+                if time.monotonic() > self._poweroff_reconnect_deadline:
+                    _LOG.warning("%s Power-off reconnect deadline expired, "
+                                "falling back to DISCONNECTED", self.log_id)
+                    self._poweroff_reconnecting = False
+                    self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
+                    return
+
+                attempt += 1
+                wait = 5 if attempt == 1 else 10
+                _LOG.info("%s Power-off reconnect attempt %d (waiting %ds)",
+                         self.log_id, attempt, wait)
+
+                # Clean up old client resources (preserves model cache)
+                await self.disconnect_client(full_reset=False)
+                await asyncio.sleep(wait)
+
+                if not self._poweroff_reconnecting:
+                    return  # Cancelled by turn_on() or disconnect()
+
+                # Create fresh client + state with cached model
+                try:
+                    self._client = Client(self._device_config.host, self._device_config.port)
+                    self._arcam_state = State(self._client, self._device_config.zone)
+
+                    # Restore cached model to skip Group 0 detection
+                    if self._cached_api_model is not None:
+                        self._arcam_state._api_model = self._cached_api_model
+                        self._model_detected = True
+                    if self._cached_amxduet is not None:
+                        self._arcam_state._amxduet = self._cached_amxduet
+
+                    await self._client.start()
+                    await self._arcam_state.start()
+                except Exception as err:
+                    _LOG.debug("%s Power-off reconnect: connect failed: %s", self.log_id, err)
+                    continue
+
+                # Start process loop as a liveness probe — if the heartbeat
+                # gets a response within 12s, the receiver is ready.
+                self._process_task = asyncio.create_task(
+                    self._run_process_loop_with_listener())
+
+                # Wait 12s for the process loop to survive (heartbeat at 5s, timeout at 10s,
+                # plus margin). If it dies, the receiver isn't ready yet.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(self._process_task), timeout=12)
+                    # Process loop exited cleanly — shouldn't happen, treat as failure
+                    _LOG.debug("%s Power-off reconnect: process loop exited early", self.log_id)
+                    continue
+                except asyncio.TimeoutError:
+                    # Good — process loop survived 12s, receiver is responsive
+                    pass
+                except Exception:
+                    # Process loop died — receiver not ready yet
+                    _LOG.debug("%s Power-off reconnect: process loop died, retrying", self.log_id)
+                    continue
+
+                if not self._poweroff_reconnecting:
+                    return  # Cancelled while waiting
+
+                # Success — receiver is back. Run Group 1 queries and restore state.
+                _LOG.info("%s Power-off reconnect: receiver responsive, syncing state",
+                         self.log_id)
+
+                self._initial_sync_complete = False
+                self._mark_all_stale()
+                await asyncio.sleep(0.5)
+
+                try:
+                    # Group 1 only (model already cached, skip Group 0)
+                    group1_ok = True
+                    for cc in [CommandCodes.POWER, CommandCodes.VOLUME,
+                                CommandCodes.MUTE, CommandCodes.CURRENT_SOURCE]:
+                        if not await self._query_command(cc, delay=0.3):
+                            _LOG.warning("%s Power-off reconnect: Group 1 query failed",
+                                        self.log_id)
+                            group1_ok = False
+                            break
+                except Exception as err:
+                    _LOG.warning("%s Power-off reconnect: state sync failed: %s",
+                                self.log_id, err)
+                    continue
+
+                if not group1_ok:
+                    continue
+
+                self._initial_sync_complete = True
+                await self._initialize_state()
+
+                # Start background tasks
+                self._trickle_task = asyncio.create_task(self._trickle_remaining_state())
+                if self._polling_mode != PollingMode.OFF:
+                    self._maintain_task = asyncio.create_task(self._maintain_connection_loop())
+
+                self._poweroff_reconnecting = False
+                _LOG.info("%s Power-off reconnect complete", self.log_id)
+                return
+
+        except asyncio.CancelledError:
+            _LOG.debug("%s Power-off reconnect task cancelled", self.log_id)
+            raise
+        except Exception as err:
+            _LOG.error("%s Power-off reconnect error: %s (%s)",
+                      self.log_id, err, type(err).__name__)
+            self._poweroff_reconnecting = False
+            self.events.emit(DeviceEvents.DISCONNECTED, self.identifier)
+
     @_tracks_interaction
     async def turn_on(self) -> bool:
-        """Turn device on."""
+        """Turn device on.
+
+        If the device is in power-off reconnect state, cancels the background
+        reconnect and does a full framework reconnect (with Group 0 model
+        detection) since the receiver is coming back online.
+        """
+        if self._poweroff_reconnecting:
+            _LOG.info("%s Turn on during power-off reconnect: "
+                     "cancelling reconnect, doing full connect", self.log_id)
+            await self._cancel_poweroff_reconnect()
+            await self.disconnect_client(full_reset=False)
+            self._model_detected = False  # Full Group 0 since receiver is powering on
+
+            try:
+                if not await self._connect_client_internal():
+                    _LOG.error("%s Turn on failed: reconnect failed", self.log_id)
+                    return False
+            except Exception as err:
+                _LOG.error("%s Turn on failed during reconnect: %s (%s)",
+                          self.log_id, err, type(err).__name__)
+                return False
+
         if not self._arcam_state:
             _LOG.error("%s Turn on failed: state not initialized", self.log_id)
             return False
@@ -864,24 +1061,40 @@ class ArcamDevice(ExternalClientDevice):
 
     @_tracks_interaction
     async def turn_off(self) -> bool:
-        """Turn device off."""
+        """Turn device off.
+
+        Caches model info and arms the power-off reconnect mechanism so that
+        when the heartbeat inevitably fails (~10s later), the process loop
+        starts a gentle reconnect instead of the normal DISCONNECTED cascade.
+        """
         if not self._arcam_state:
             _LOG.error("%s Turn off failed: state not initialized", self.log_id)
             return False
+
+        # Cache model info before power off for reconnect without re-detection
+        self._cached_api_model = self._arcam_state._api_model
+        self._cached_amxduet = self._arcam_state._amxduet
+
         try:
             _LOG.info("%s Turning off (API model: %s)", self.log_id, self._arcam_state._api_model)
             await self._arcam_state.set_power(False)
-            self._power = False
-            self._emit_update()
-            return True
         except asyncio.TimeoutError:
-            _LOG.warning("%s Turn off timeout - setting state optimistically", self.log_id)
-            self._power = False
-            self._emit_update()
-            return True
+            _LOG.warning("%s Turn off timeout - proceeding optimistically", self.log_id)
         except Exception as err:
             _LOG.error("%s Turn off failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
+
+        self._power = False
+        self._emit_update()
+
+        # Arm power-off reconnect: when the process loop dies from heartbeat
+        # failure, it will start a gentle reconnect instead of emitting DISCONNECTED.
+        if not self._poweroff_reconnecting:
+            self._poweroff_reconnecting = True
+            self._poweroff_reconnect_deadline = time.monotonic() + 120
+            _LOG.info("%s Armed power-off reconnect (2 min deadline)", self.log_id)
+
+        return True
 
     @_tracks_interaction
     async def set_volume(self, volume: int) -> bool:
