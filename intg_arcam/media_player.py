@@ -36,6 +36,7 @@ class ArcamMediaPlayer(MediaPlayerEntity):
             Features.UNMUTE,
             Features.MUTE,
             Features.SELECT_SOURCE,
+            Features.SELECT_SOUND_MODE,
         ]
 
         attributes = {
@@ -44,6 +45,8 @@ class ArcamMediaPlayer(MediaPlayerEntity):
             Attributes.MUTED: False,
             Attributes.SOURCE: "",
             Attributes.SOURCE_LIST: [],
+            Attributes.SOUND_MODE: "",
+            Attributes.SOUND_MODE_LIST: [],
         }
 
         options = {
@@ -68,6 +71,8 @@ class ArcamMediaPlayer(MediaPlayerEntity):
             Attributes.MUTED: self._device.muted,
             Attributes.SOURCE: self._device.source or "",
             Attributes.SOURCE_LIST: self._device.source_list,
+            Attributes.SOUND_MODE: self._device.sound_mode or "",
+            Attributes.SOUND_MODE_LIST: self._device.sound_mode_list,
         })
 
     async def handle_command(
@@ -114,6 +119,12 @@ class ArcamMediaPlayer(MediaPlayerEntity):
             elif cmd_id == Commands.SELECT_SOURCE:
                 if params and "source" in params:
                     success = await self._device.select_source(params["source"])
+                    return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+                return StatusCodes.BAD_REQUEST
+
+            elif cmd_id == Commands.SELECT_SOUND_MODE:
+                if params and "mode" in params:
+                    success = await self._device.set_decode_mode(params["mode"])
                     return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
                 return StatusCodes.BAD_REQUEST
 
