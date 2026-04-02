@@ -66,11 +66,39 @@ RC5_COMMANDS = {
     "INPUT_UHD": (0x10, 0x7D),
     "INPUT_BT": (0x10, 0x7A),
     "INPUT_GAME": (0x10, 0x61),
+    "INPUT_RADIO": (0x10, 0x5B),   # Tuner input (FM/DAB toggle)
+    # SA series inputs — reuse same RC5 codes with model-appropriate labels
+    "INPUT_PHONO": (0x10, 0x75),    # Same RC5 as INPUT_VCR (SA label)
+    "INPUT_ARC_ERC": (0x10, 0x7D),  # Same RC5 as INPUT_UHD (SA label)
+    # ST series inputs — RC5 system 21 (0x15), not system 16 (0x10)
+    "INPUT_DIG1": (0x15, 0x5E),
+    "INPUT_DIG2": (0x15, 0x62),
+    "INPUT_DIG3": (0x15, 0x1B),
+    "INPUT_DIG4": (0x15, 0x61),
+    "INPUT_USB_ST": (0x15, 0x5D),   # ST60 USB (system 21)
+    "INPUT_NET_ST": (0x15, 0x5C),   # ST60 NET (system 21)
+    # Audio mode RC5 commands — some share the same RC5 code across model series
+    # (e.g., DOLBY_PLII_MOVIE and AURO_NATIVE are both 0x67) because the receiver
+    # interprets the same IR code differently per model. We keep distinct command
+    # names so each model shows correctly labeled buttons.
     "STEREO": (0x10, 0x6B),
     "DOLBY_PLII_MOVIE": (0x10, 0x67),
     "DOLBY_PLII_MUSIC": (0x10, 0x68),
+    "DOLBY_PLII_GAME": (0x10, 0x66),
+    "DOLBY_PL": (0x10, 0x6E),
     "DTS_NEO6_CINEMA": (0x10, 0x6F),
     "DTS_NEO6_MUSIC": (0x10, 0x70),
+    "MCH_STEREO": (0x10, 0x45),
+    # MULTI_CHANNEL is not in any model's audio modes page but is kept in the
+    # RC5 table so it can be sent via automations or direct SEND_CMD calls.
+    "MULTI_CHANNEL": (0x10, 0x6A),
+    "DOLBY_SURROUND": (0x10, 0x6E),       # Same RC5 as DOLBY_PL (HDA label)
+    "DTS_NEURAL_X": (0x10, 0x71),
+    "DTS_VIRTUAL_X": (0x10, 0x73),
+    "DOLBY_VIRTUAL_HEIGHT": (0x10, 0x73),  # Same RC5 as DTS_VIRTUAL_X (HDA label)
+    "AURO_NATIVE": (0x10, 0x67),           # Same RC5 as DOLBY_PLII_MOVIE (HDA label)
+    "AURO_MATIC_3D": (0x10, 0x47),
+    "AURO_2D": (0x10, 0x68),              # Same RC5 as DOLBY_PLII_MUSIC (HDA label)
 }
 
 
@@ -182,6 +210,13 @@ class ArcamDevice(ExternalClientDevice):
     @property
     def room_eq(self) -> str | None:
         return self._room_eq
+
+    @property
+    def api_model(self) -> ApiModel | None:
+        """Detected API model series, or None if state not initialized."""
+        if self._arcam_state:
+            return self._arcam_state._api_model
+        return None
 
     # All command codes tracked for staleness (Groups 1, 2, 3)
     _ALL_TRACKED_COMMANDS: set[CommandCodes] = {
@@ -852,14 +887,16 @@ class ArcamDevice(ExternalClientDevice):
         self._state = "ON" if self._power else "OFF"
         self.push_update()
 
-    def _format_room_eq(self, index: int) -> str | None:
+    def _format_room_eq(self, index: int) -> str:
         """Format room EQ index as a display string, using name if available.
 
-        Returns None if the name is not yet known (waiting for ROOM_EQ_NAMES).
+        HDA series receivers provide named presets via ROOM_EQ_NAMES; other
+        models (e.g. 860 series) support ROOM_EQUALIZATION but not named
+        presets, so we fall back to "Preset N".
         """
         if index == 0:
             return "Off"
-        return self._room_eq_names.get(index)
+        return self._room_eq_names.get(index, f"Preset {index}")
 
     def _parse_room_eq_names(self) -> None:
         """Parse room EQ names from state data (0x34 response).
