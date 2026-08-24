@@ -1,6 +1,6 @@
 [project]
 name = "uc-intg-arcam"
-version = "2.1.1"
+version = "2.1.2"
 description = "Arcam FMJ integration for Unfolded Circle Remote"
 readme = "README.md"
 requires-python = ">=3.11"
