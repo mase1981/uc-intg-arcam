@@ -50,7 +50,7 @@ class ArcamMediaPlayer(MediaPlayerEntity):
         }
 
         options = {
-            "volume_steps": 100
+            "volume_steps": 99
         }
 
         super().__init__(
