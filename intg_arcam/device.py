@@ -745,7 +745,7 @@ class ArcamDevice(ExternalClientDevice):
 
             raw_volume = self._arcam_state.get_volume()
             if raw_volume is not None:
-                self._volume = self._arcam_vol_to_percent(raw_volume)
+                self._volume = max(0, min(99, raw_volume))
             else:
                 self._volume = 0
 
@@ -806,8 +806,9 @@ class ArcamDevice(ExternalClientDevice):
         try:
             changed = False
 
-            # Suppress power state changes briefly after user commands to avoid
-            # ON→OFF→ON bounce during device power transitions.
+            # Suppress power and volume state changes briefly after user commands
+            # to avoid a delayed push stomping a value we just set (ON→OFF→ON
+            # power bounce, or a stale volume overwriting the new level).
             command_suppression = time.monotonic() - self._last_command_time < 3.0
 
             power = self._arcam_state.get_power()
@@ -816,8 +817,8 @@ class ArcamDevice(ExternalClientDevice):
                 changed = True
 
             raw_volume = self._arcam_state.get_volume()
-            if raw_volume is not None:
-                volume = self._arcam_vol_to_percent(raw_volume)
+            if raw_volume is not None and not command_suppression:
+                volume = max(0, min(99, raw_volume))
                 if volume != self._volume:
                     self._volume = volume
                     changed = True
@@ -1135,15 +1136,15 @@ class ArcamDevice(ExternalClientDevice):
 
     @_tracks_interaction
     async def set_volume(self, volume: int) -> bool:
-        """Set volume level (0-100)."""
+        """Set volume to the AVR's raw 0-99 level, mirroring its OSD scale."""
         if not self._arcam_state:
             _LOG.error("%s Set volume failed: state not initialized", self.log_id)
             return False
         try:
-            arcam_vol = self._percent_to_arcam_vol(volume)
-            _LOG.info("%s Setting volume to %d (%d raw)", self.log_id, volume, arcam_vol)
-            await self._arcam_state.set_volume(int(arcam_vol))
-            self._volume = volume
+            arcam_vol = max(0, min(99, int(volume)))
+            _LOG.info("%s Setting volume to %d", self.log_id, arcam_vol)
+            await self._arcam_state.set_volume(arcam_vol)
+            self._volume = arcam_vol
             self._emit_update()
             return True
         except asyncio.TimeoutError:
@@ -1154,14 +1155,12 @@ class ArcamDevice(ExternalClientDevice):
             return False
 
     async def volume_up(self) -> bool:
-        """Increase volume by one step."""
-        new_volume = min(100, self._volume + 1)
-        return await self.set_volume(new_volume)
+        """Increase volume by one raw step."""
+        return await self.set_volume(self._volume + 1)
 
     async def volume_down(self) -> bool:
-        """Decrease volume by one step."""
-        new_volume = max(0, self._volume - 1)
-        return await self.set_volume(new_volume)
+        """Decrease volume by one raw step."""
+        return await self.set_volume(self._volume - 1)
 
     @_tracks_interaction
     async def mute(self, mute: bool) -> bool:
@@ -1207,14 +1206,6 @@ class ArcamDevice(ExternalClientDevice):
         except Exception as err:
             _LOG.error("%s Select source failed: %s (%s)", self.log_id, err, type(err).__name__)
             return False
-
-    def _arcam_vol_to_percent(self, arcam_vol: int) -> int:
-        """Convert Arcam volume (0-99) to percentage (0-100)."""
-        return min(100, max(0, round(arcam_vol * 100 / 99)))
-
-    def _percent_to_arcam_vol(self, percent: int) -> int:
-        """Convert percentage (0-100) to Arcam volume (0-99)."""
-        return min(99, max(0, round(percent * 99 / 100)))
 
     @_tracks_interaction
     async def send_rc5_command(self, command: str) -> bool:
