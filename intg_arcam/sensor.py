@@ -50,6 +50,40 @@ class ArcamAudioFormatSensor(SensorEntity):
         })
 
 
+class ArcamVideoModeSensor(SensorEntity):
+    """Sensor for displaying the incoming video mode (HDA-series only)."""
+
+    def __init__(self, device_config: ArcamConfig, device: ArcamDevice):
+        self._device = device
+        self._device_config = device_config
+
+        entity_id = f"sensor.{device_config.identifier}.video_mode"
+        entity_name = f"{device_config.name} Video Mode"
+
+        attributes = {
+            Attributes.STATE: States.UNKNOWN,
+            Attributes.VALUE: "Unknown",
+        }
+
+        super().__init__(
+            entity_id,
+            entity_name,
+            [],
+            attributes,
+            device_class=None,
+        )
+        self.subscribe_to_device(device)
+
+        _LOG.info("[%s] Video mode sensor initialized", entity_id)
+
+    async def sync_state(self):
+        value = self._device.video_mode
+        self.update({
+            Attributes.STATE: States.ON if value else States.UNKNOWN,
+            Attributes.VALUE: value or "",
+        })
+
+
 class ArcamSoundModeSensor(SensorEntity):
     """Sensor for displaying current sound/decode mode."""
 

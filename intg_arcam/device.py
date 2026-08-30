@@ -155,6 +155,7 @@ class ArcamDevice(ExternalClientDevice):
         self._sound_mode = None
         self._sound_mode_list = []
         self._audio_format = None
+        self._video_mode = None
         self._room_eq = None
         self._room_eq_index: int = 0
         self._room_eq_names: dict[int, str] = {}
@@ -206,6 +207,10 @@ class ArcamDevice(ExternalClientDevice):
     @property
     def audio_format(self) -> str | None:
         return self._audio_format
+
+    @property
+    def video_mode(self) -> str | None:
+        return self._video_mode
 
     @property
     def room_eq(self) -> str | None:
@@ -778,6 +783,8 @@ class ArcamDevice(ExternalClientDevice):
                 if fmt is not None:
                     self._audio_format = fmt.name
 
+            self._video_mode = self._read_video_mode()
+
             room_eq_data = self._arcam_state._state.get(CommandCodes.ROOM_EQUALIZATION)
             if room_eq_data is not None:
                 self._room_eq_index = int.from_bytes(room_eq_data, "big")
@@ -866,6 +873,11 @@ class ArcamDevice(ExternalClientDevice):
                         self._audio_format = fmt.name
                         changed = True
 
+            video_mode = self._read_video_mode()
+            if video_mode != self._video_mode:
+                self._video_mode = video_mode
+                changed = True
+
             room_eq_data = self._arcam_state._state.get(CommandCodes.ROOM_EQUALIZATION)
             if room_eq_data is not None:
                 idx = int.from_bytes(room_eq_data, "big")
@@ -887,6 +899,31 @@ class ArcamDevice(ExternalClientDevice):
         """Emit device state update for all subscribed entities."""
         self._state = "ON" if self._power else "OFF"
         self.push_update()
+
+    def _read_video_mode(self) -> str | None:
+        """Read and format the incoming video parameters as a display string.
+
+        Only HDA-series receivers report INCOMING_VIDEO_PARAMETERS; other
+        models never populate it, so this returns None and the sensor stays
+        "Unknown". Parsing is defensive against short/malformed payloads that
+        some firmware returns.
+        """
+        try:
+            params = self._arcam_state.get_incoming_video_parameters()
+        except Exception:
+            return None
+        if params is None:
+            return None
+        try:
+            h = params.horizontal_resolution
+            v = params.vertical_resolution
+            if not h or not v:
+                return None
+            scan = "i" if params.interlaced else "p"
+            rate = params.refresh_rate
+            return f"{h}x{v}{scan} {rate}Hz" if rate else f"{h}x{v}{scan}"
+        except Exception:
+            return None
 
     def _format_room_eq(self, index: int) -> str:
         """Format room EQ index as a display string, using name if available.
